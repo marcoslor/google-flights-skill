@@ -12,3 +12,5 @@ dist/
 
 # sheesh, nice env you got here
 .env
+
+.DS_Store
