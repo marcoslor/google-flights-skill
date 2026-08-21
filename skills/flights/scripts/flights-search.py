@@ -297,9 +297,22 @@ def _grid_chunks_for_window(window: int) -> int:
     return dep_chunks * ret_chunks
 
 
-def _explore_request_estimate(n_dests: int, window: int | None) -> int:
+def _explore_request_estimate(n_dests: int, window: int | None, months: int = 1) -> int:
     """Estimated Google RPC count for an explore run."""
-    return n_dests * (_grid_chunks_for_window(window) if window is not None else 1)
+    return n_dests * (_grid_chunks_for_window(window) if window is not None else 1) * max(1, months)
+
+
+_FLEX_MONTH_STEP_DAYS = 28  # anchors every 4 weeks; window edges overlap so coverage stays contiguous
+
+
+def flex_month_anchors(date: str, return_date: str, months: int) -> list[tuple[str, str]]:
+    """Monthly (departure, return) anchor pairs for a long-horizon sweep."""
+    d0, r0 = _parse_date(date), _parse_date(return_date)
+    return [
+        ((d0 + _dt.timedelta(days=_FLEX_MONTH_STEP_DAYS * k)).isoformat(),
+         (r0 + _dt.timedelta(days=_FLEX_MONTH_STEP_DAYS * k)).isoformat())
+        for k in range(max(1, months))
+    ]
 
 
 def _stay_overlap(min_stay: int | None, max_stay: int | None, base_stay: int, window: int) -> tuple[int, int] | None:
@@ -919,7 +932,27 @@ def _calendar_grid_chunk(
         timeout=_CALENDAR_CALL_TIMEOUT,
     )
     response.raise_for_status()
-    return _parse_calendar_grid(response.text)
+    # A captcha/consent wall answers HTTP 200 with HTML — surface it instead of
+    # parsing to a silent zero-cell result.
+    if "wrb.fr" not in response.text[:8000]:
+        snippet = response.text[:150].replace("\n", " ")
+        raise RuntimeError(
+            f"GetCalendarGrid returned a non-payload response (captcha/consent wall?) head={snippet}"
+        )
+    entries = _parse_calendar_grid(response.text)
+    if not entries:
+        # Soft-throttled responses sometimes carry a valid envelope without
+        # cells; one quick retry usually recovers them.
+        time.sleep(1.5)
+        response = session["client"].post(
+            _CALENDAR_GRID_ENDPOINT + params,
+            headers=headers,
+            data=body,
+            timeout=_CALENDAR_CALL_TIMEOUT,
+        )
+        response.raise_for_status()
+        entries = _parse_calendar_grid(response.text)
+    return entries
 
 
 def _pair_query(
@@ -1178,6 +1211,7 @@ def main():
     p.add_argument("--price-insights", action="store_true", help="include Google's price insights panel (current/typical/usual band/verdict), free from payload[5]")
     p.add_argument("--keep-tokens", action="store_true", help="keep per-cell booking_token in grid output (for preselected browser flows)")
     p.add_argument("--flex-window", type=int, default=None, help="flexible search: +/- N days around --date (and --return-date if set; without it = one-way flex). 2 => 5 dates per axis")
+    p.add_argument("--flex-months", type=int, default=1, help="repeat the flex window at monthly anchors (28d step): 6 with --flex-window 15 = contiguous 6-month sweep; small windows sample periodically across months")
     p.add_argument("--flex-grid", action="store_true", help="with --flex-window, use Google's native 2-axis departure×return calendar (one RPC per <=200-cell chunk). Requires --return-date")
     p.add_argument("--min-stay", type=int, default=None, help="variable stay: min days (requires --max-stay)")
     p.add_argument("--max-stay", type=int, default=None, help="variable stay: max days (requires --min-stay)")
@@ -1198,6 +1232,10 @@ def main():
     args = p.parse_args()
 
     # ── early date validation (workable errors) ──
+    if not (1 <= args.flex_months <= 12):
+        emit_error("--flex-months must be 1..12", hint="workable: 6 = half-year sweep; each month adds the window's request cost")
+    if args.flex_months > 1 and args.flex_window is None:
+        emit_error("--flex-months requires --flex-window", hint="workable: add --flex-window 15 for dense monthly coverage, or a small window like 2 for periodic sampling")
     for label, val in [("--date", args.date), ("--return-date", args.return_date)]:
         if val:
             try:
@@ -1260,7 +1298,7 @@ def main():
         # grid chunk). Never error out on big fan-outs — auto-cap the list to
         # fit the budget (direct routes first) and report coverage in-band so
         # zero-context agents always get results plus honest scope notes.
-        est_requests = _explore_request_estimate(len(dests), args.flex_window)
+        est_requests = _explore_request_estimate(len(dests), args.flex_window, args.flex_months)
         max_requests = max(1, args.explore_max_requests)
         if est_requests > max_requests:
             per_dest = _grid_chunks_for_window(args.flex_window) if args.flex_window is not None else 1
@@ -1327,7 +1365,9 @@ def main():
             _probe = _pair_query(args.from_, dests[0]["iata"], args.date, args.return_date, args.currency, args.language, args.seat, passengers_dict, baggage_args, filters) if dests else None
             shared_session = _open_calendar_session(_probe or args, args.proxy, args.currency)
             started = time.monotonic()
-            for searched_count, destination in enumerate(dests):
+            searched_count = 0
+            grid_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+            for destination in dests:
                 if time.monotonic() - started > args.explore_time_budget:
                     budget_note = explore_meta.setdefault("request_budget", {})
                     budget_note["time_capped"] = {
@@ -1337,38 +1377,59 @@ def main():
                         "note": "stopped early at the time budget; results above are complete for the destinations searched",
                     }
                     break
-                try:
-                    entries, _ = native_grid_for_route(
-                        args.from_,
-                        destination["iata"],
-                        args.date,
-                        args.return_date,
-                        window,
-                        args.currency,
-                        args.language,
-                        args.seat,
-                        passengers_dict,
-                        baggage_args,
-                        filters,
-                        args.max_price,
-                        args.proxy,
-                        conc,
-                        session=shared_session,
-                        keep_tokens=args.keep_tokens,
-                    )
-                    grid.extend(entries)
-                    total_pairs += len(entries)
-                except Exception as e:
-                    detail, hint = _classify_fetch_error(e)
-                    grid.append({
-                        "departure": args.date,
-                        "return": args.return_date,
-                        "price": None,
-                        "url": None,
-                        "error": detail,
-                        "hint": hint,
-                        "to": destination["iata"],
-                    })
+                dest_errored = False
+                for anchor_dep, anchor_ret in flex_month_anchors(args.date, args.return_date, args.flex_months):
+                    if time.monotonic() - started > args.explore_time_budget:
+                        budget_note = explore_meta.setdefault("request_budget", {})
+                        budget_note["time_capped"] = {
+                            "searched_destinations": searched_count,
+                            "skipped_destinations": len(dests) - searched_count,
+                            "budget_seconds": args.explore_time_budget,
+                            "note": "stopped early at the time budget; results above are complete for the destinations searched",
+                        }
+                        break
+                    try:
+                        entries, _ = native_grid_for_route(
+                            args.from_,
+                            destination["iata"],
+                            anchor_dep,
+                            anchor_ret,
+                            window,
+                            args.currency,
+                            args.language,
+                            args.seat,
+                            passengers_dict,
+                            baggage_args,
+                            filters,
+                            args.max_price,
+                            args.proxy,
+                            conc,
+                            session=shared_session,
+                            keep_tokens=args.keep_tokens,
+                        )
+                        for entry in entries:
+                            key = (entry["departure"], entry["return"], entry["to"])
+                            if key not in grid_by_key:
+                                grid_by_key[key] = entry
+                                total_pairs += 1
+                    except Exception as e:
+                        detail, hint = _classify_fetch_error(e)
+                        dest_errored = True
+                        grid_by_key.setdefault(
+                            (anchor_dep, anchor_ret, destination["iata"]),
+                            {
+                                "departure": anchor_dep,
+                                "return": anchor_ret,
+                                "price": None,
+                                "url": None,
+                                "error": detail,
+                                "hint": hint,
+                                "to": destination["iata"],
+                            },
+                        )
+                if not dest_errored:
+                    searched_count += 1
+            grid.extend(grid_by_key.values())
             mode = "explore+native-calendar-grid"
         else:
             # single pair per dest: one grid cell each (window 0)
@@ -1586,35 +1647,52 @@ def main():
             "less_emissions": bool(args.less_emissions),
         }
         grid: list[dict[str, Any]] = []
-        try:
-            grid, _ = native_grid_for_route(
-                args.from_,
-                args.to,
-                args.date,
-                args.return_date,
-                window,
-                args.currency,
-                args.language,
-                args.seat,
-                passengers_dict,
-                baggage_args,
-                filters,
-                args.max_price,
-                args.proxy,
-                conc,
-                keep_tokens=args.keep_tokens,
-            )
-        except Exception as e:
-            detail, hint = _classify_fetch_error(e)
-            grid = [{
-                "departure": args.date,
-                "return": args.return_date,
-                "price": None,
-                "url": None,
-                "error": detail,
-                "hint": hint,
-                "to": args.to,
-            }]
+        grid_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        first_error: tuple[str, str] | None = None
+        for anchor_dep, anchor_ret in flex_month_anchors(args.date, args.return_date, args.flex_months):
+            if first_error is None and args.flex_months > 1:
+                time.sleep(1.0)  # gentle pacing between monthly anchors
+            try:
+                entries, _ = native_grid_for_route(
+                    args.from_,
+                    args.to,
+                    anchor_dep,
+                    anchor_ret,
+                    window,
+                    args.currency,
+                    args.language,
+                    args.seat,
+                    passengers_dict,
+                    baggage_args,
+                    filters,
+                    args.max_price,
+                    args.proxy,
+                    conc,
+                    keep_tokens=args.keep_tokens,
+                )
+                for entry in entries:
+                    key = (entry["departure"], entry["return"])
+                    if key not in grid_by_key:
+                        grid_by_key[key] = entry
+            except Exception as e:
+                detail, hint = _classify_fetch_error(e)
+                if first_error is None:
+                    first_error = (detail, hint)
+                grid_by_key.setdefault(
+                    (anchor_dep, anchor_ret),
+                    {
+                        "departure": anchor_dep,
+                        "return": anchor_ret,
+                        "price": None,
+                        "url": None,
+                        "error": detail,
+                        "hint": hint,
+                        "to": args.to,
+                    },
+                )
+        grid = list(grid_by_key.values())
+        if args.flex_months > 1:
+            grid.sort(key=lambda x: (x.get("departure") or "", x.get("return") or ""))
         total_pairs = len(grid)
 
         # Stay filters on the returned matrix. Default (no --flex-grid, no
@@ -1666,7 +1744,7 @@ def main():
         out = {
             "ok": True,
             "mode": mode,
-            "query": {"from": args.from_, "to": args.to, "date": args.date, "return_date": args.return_date, "trip": trip, "seat": args.seat, "currency": args.currency, "flex_window": window, "flex_grid": args.flex_grid, "min_stay": args.min_stay, "max_stay": args.max_stay},
+            "query": {"from": args.from_, "to": args.to, "date": args.date, "return_date": args.return_date, "trip": trip, "seat": args.seat, "currency": args.currency, "flex_window": window, "flex_months": args.flex_months, "flex_grid": args.flex_grid, "min_stay": args.min_stay, "max_stay": args.max_stay},
             "count": count_ok,
             "total_pairs": total_pairs,
             "grid": grid_sorted,
@@ -1675,6 +1753,8 @@ def main():
         }
         if count_ok == 0:
             out["hint"] = "workable: no flights in grid - try different dates/weekday, remove --airlines/--max-stops, increase --flex-window, or add --price-graph for near-term"
+            if first_error:
+                out["hint"] += f" | last fetch error: {first_error[0][:120]} — {first_error[1]}"
         if native_graph is not None:
             out["price_graph"] = native_graph
             # also show cheapest in graph for fixed stay

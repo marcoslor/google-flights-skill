@@ -187,6 +187,22 @@ Optional explore flags:
 - `--explore-time-budget S` — wall-clock budget (default 120s): stops launching new destinations after S seconds and returns partial results with a `time_capped` coverage note
 - `--flex-window` / `--min-stay` / `--max-stay` work with explore (stay range must overlap what the window can reach, or the command says so upfront)
 
+## Long-horizon sweeps (--flex-months)
+
+Open-ended date questions ("after January", "sometime next summer") should SWEEP months, not anchor on one week:
+
+```
+# contiguous 6-month sweep of one route (window 15 covers each month densely; ~9 RPCs/month)
+scripts/flights-search.py --from SSA --to BCN --date 2027-02-09 --return-date 2027-02-17 --flex-window 15 --flex-months 6
+
+# light sampling across 6 months (3 anchors' worth of requests — good first pass)
+scripts/flights-search.py --from SSA --date 2027-02-10 --return-date 2027-02-19 --airlines G3,AF --explore-intl --flex-window 2 --flex-months 6
+```
+
+`--flex-months N` (1..12) repeats the window at anchors every 28 days and dedupes cells. Request cost multiplies by N; the explore request/time budgets still auto-cap destinations. Pacing (1s between monthly anchors) keeps anonymous sessions off Google's captcha wall; if you still hit HTTP 429 `/sorry`, wait a few minutes and retry — the error is surfaced in the output hint.
+
+**Agent rule:** for open-ended periods, default to `--flex-months` matching the asked horizon (e.g. "after January" → sweep Feb–Jul: `--flex-months 5..6`). Start with a small window + wide month span; drill down with `--flex-window 15` on the cheapest month only.
+
 ## Invoking from an agent (minimal context)
 Pass the skill + query + output intent:
 ```
