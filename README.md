@@ -1,4 +1,4 @@
-# flights-search — Google Flights CLI facade for agents
+# flights-search — Google Flights CLI + skill for agents
 
 One-shot Google Flights searches from the command line, designed for LLM agents and scripts: **one invocation, one JSON line**. No browser, no login, no anti-bot wall.
 
