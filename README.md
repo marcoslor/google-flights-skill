@@ -1,6 +1,6 @@
 # google-flights-search skill
 
-Search Google Flights from the command line. One command, one JSON result — built for AI agents and scripts. No browser, no login, no anti-bot wall.
+Skill + CLI helpers that let AI agents search Google Flights from the command line, using reverse-engineered Google Flights internals. One command returns one JSON result — no browser, no login, no anti-bot wall.
 
 It replicates the full Google Flights web experience: every search filter, flexible-date grids, price insights and graphs, multi-airport and nearby-airport searches, "explore anywhere", even partner-airline itineraries.
 
