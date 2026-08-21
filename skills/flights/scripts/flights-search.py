@@ -847,6 +847,12 @@ def _open_calendar_session(query, proxy: str | None, currency: str, client: Any 
     }
 
 
+# Anonymous GetCalendarGrid bursts get throttled by Google; keep per-call
+# latency bounded so stalled cells fail into per-destination error entries
+# instead of stalling the whole explore run.
+_CALENDAR_CALL_TIMEOUT = 15
+
+
 def _calendar_grid_chunk(
     session: dict[str, Any],
     from_arg: str,
@@ -897,6 +903,7 @@ def _calendar_grid_chunk(
         _CALENDAR_GRID_ENDPOINT + params,
         headers=headers,
         data=body,
+        timeout=_CALENDAR_CALL_TIMEOUT,
     )
     response.raise_for_status()
     return _parse_calendar_grid(response.text)
@@ -1169,7 +1176,7 @@ def main():
     p.add_argument("--explore-scope", choices=["direct", "network"], default="network", help="direct=only routes from --from, network=direct+1-stop via hub (anywhere, general, e.g. SSA->CDG->MAD). Default network for anywhere.")
     p.add_argument("--explore-limit", type=int, default=None, help="cap number of explored destinations (cheapest km first)")
     p.add_argument("--explore-cache-ttl", type=int, default=24, help="cache TTL hours for airline_routes.json (default 24)")
-    p.add_argument("--explore-max-requests", type=int, default=40, help="refuse explore runs estimated above this many Google requests (default 40)")
+    p.add_argument("--explore-max-requests", type=int, default=15, help="auto-cap explore destination list to fit this many Google requests (default 15; anonymous bursts get throttled beyond that)")
     # multi-airport / nearby
     p.add_argument("--nearby", action="store_true", help="expand --from/--to with airports within --nearby-km (offline dataset, OR-search via repeated tfs airports)")
     p.add_argument("--nearby-km", type=int, default=120, help="radius for --nearby expansion (default 120 km)")
@@ -1236,22 +1243,28 @@ def main():
             dests = dests[: args.explore_limit]
 
         # Request-budget guard: explore fans out one RPC per destination (per
-        # grid chunk). Refuse combos that would run for minutes so the agent
-        # can tell the user instead of hanging until the shell timeout.
+        # grid chunk). Never error out on big fan-outs — auto-cap the list to
+        # fit the budget (direct routes first) and report coverage in-band so
+        # zero-context agents always get results plus honest scope notes.
         est_requests = _explore_request_estimate(len(dests), args.flex_window)
         max_requests = max(1, args.explore_max_requests)
         if est_requests > max_requests:
             per_dest = _grid_chunks_for_window(args.flex_window) if args.flex_window is not None else 1
-            suggested_limit = max(0, max_requests // per_dest)
-            emit_error(
-                f"explore would issue ~{est_requests} Google requests ({len(dests)} destinations x {per_dest} grid chunk(s) each)",
-                hint=(
-                    "workable: this fan-out exceeds the request budget -- "
-                    f"cap destinations with --explore-limit {suggested_limit}, drop --flex-window for single-pair pricing, "
-                    "narrow --airlines/--explore-intl, or query a few destinations individually"
-                ),
-                extra={"estimated_requests": est_requests, "destinations": len(dests), "chunks_per_destination": per_dest},
-            )
+            cap = max_requests // per_dest
+            if cap < 1:
+                emit_error(
+                    f"--explore-max-requests {max_requests} cannot fit even one destination ({per_dest} grid chunk(s) each)",
+                    hint=f"workable: raise --explore-max-requests to at least {per_dest}, or reduce --flex-window",
+                )
+            requested_count = len(dests)
+            dests = dests[:cap]
+            explore_meta["request_budget"] = {
+                "capped": True,
+                "requested_destinations": requested_count,
+                "searched_destinations": len(dests),
+                "estimated_requests": len(dests) * per_dest,
+                "note": "direct routes kept first; narrow --airlines/--explore-intl or loop destinations individually for full coverage",
+            }
 
         # Flexible dates are served entirely by the native calendar grid;
         # stay filters are applied client-side on the returned matrix.

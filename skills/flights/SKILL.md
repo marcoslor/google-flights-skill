@@ -181,7 +181,7 @@ Optional explore flags:
 - `--explore` — explicit alias for omit-`--to` (redundant)
 - `--explore-intl` — only international
 - `--explore-limit N` / `--explore-validate` — cap / prune stale
-- `--explore-max-requests N` — request budget (default 40). Explore fans out one Google RPC per destination (per grid chunk); combos above the budget are refused instantly with a workable hint — narrow with `--explore-limit`, drop `--flex-window`, or tighten filters instead of waiting on a timeout
+- `--explore-max-requests N` — request budget (default 15). Explore fans out one Google RPC per destination; big fan-outs are auto-capped to fit the budget (direct routes first) and the run always succeeds — `explore_meta.request_budget` reports coverage (e.g. searched 15 of 181). For full coverage narrow `--airlines`/`--explore-intl`, raise the budget, or loop destinations individually
 - `--flex-window` / `--min-stay` / `--max-stay` work with explore
 
 ## Invoking from an agent (minimal context)
