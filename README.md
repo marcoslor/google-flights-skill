@@ -8,20 +8,24 @@ bin/flights-search.py --from GRU --to JFK --date 2026-09-01 --return-date 2026-0
 
 This repository is a **fork of [AWeirdDev/flights](https://github.com/AWeirdDev/flights)** (`fast-flights` v3.1.0, MIT) that adds `bin/flights-search.py` — a deterministic JSON-line CLI wrapping the library plus reverse-engineered Google Flights frontend RPCs. The upstream Python package is unchanged and remains usable as a library.
 
-## What it does
+## Capability matrix (web UI vs CLI)
 
-| Capability | How | Cost |
+| Google Flights web-UI capability | CLI | How |
 |---|---|---|
-| One-way / round-trip / multi-city search | `fast-flights` protobuf (`?tfs=`) + `primp` (Chrome 145 impersonation) | 1 request |
-| All UI filters (stops, airlines/alliances, times, duration, layovers, connecting airports, cabin, passengers, bags, currency, max price, basic-economy exclusion) | encoded server-side in the protobuf query | 0 |
-| Price insights panel (current/typical/usual band/verdict) | parsed from the search response (`payload[5][1..5]`) with `--price-insights` | 0 |
-| Flexible dates — one-way or round-trip (fixed stay / variable stay / full 2-axis matrix) | native `GetCalendarGrid` batchexecute RPC (`f.sid=0`, no bootstrap), auto-chunked at 200 cells; one-way = single-leg request | 1 req per ≤200-cell chunk |
-| 61-day price graph (near-term, fixed stay) | extracted from the normal search response (`payload[5][10][0]`) with `--price-graph` | 0 |
-| Multi-airport OR-searches (`--from SSA,GRU --to MAD`) | repeated Airport entries on tfs fields 13/14 (same encoding as the UI's "select multiple airports"; verified as set-union of baselines) | 1 request |
-| Nearby-airport expansion (`--nearby`, `--nearby-km R`) | offline geo dataset ([Jonty/airline-route-data](https://github.com/Jonty/airline-route-data) lat/lon, haversine radius) merged into the OR-search | dataset cache |
-| Explore anywhere from one origin (direct + 1-stop via hub, airline-filtered) | public route dataset + grid probe per destination | N dests |
-| Partnership flights via city entities (`/m/...`) | rewrites tfs with hidden `Airport.type` field (origin city=3, dest city=2) | URL only |
-| Per-cell booking tokens for browser flows | `--keep-tokens` preserves the `booking_token` each grid cell already carries | 0 |
+| Search one-way / round-trip / multi-city | ✅ | protobuf `tfs` + `primp`, 1 request |
+| Full filter set (stops, airlines/alliances, times, duration, layovers, connections, cabin, passengers, bags, currency, max price, basic-economy) | ✅ | encoded server-side in the query |
+| Flexible dates — round-trip (fixed stay, variable stay, full 2-axis matrix) | ✅ | `--flex-window` (+ `--min-stay/--max-stay`/`--flex-grid`) — native `GetCalendarGrid` RPC |
+| Flexible dates — one-way | ✅ | `--flex-window N` without `--return-date` |
+| Price graph (bar, near-term) | ✅ | `--price-graph` — parsed from the same fetch |
+| Price insights ("typical prices", high/low verdict) | ✅ | `--price-insights` — free from `payload[5][1..5]` |
+| Multiple airports per side ("select multiple airports") | ✅ | `--from SSA,GRU --to MAD` — repeated Airport on tfs fields 13/14 |
+| Nearby-airports toggle | ✅ | `--nearby [--nearby-km R]` — offline geo dataset + haversine |
+| Explore "anywhere" destinations | ✅* | `--explore` — public dataset + live grid probes; official `GetExploreDestinations` RPC assessed but needs an IATA→city-entity resolver |
+| Partner itineraries via city entities (`/m/...`) | ⚠️ | CLI builds the typed URL; results need a real browser session → open via MCP |
+| Booking options / OTA links per itinerary (`GetShoppingResults`) | ⚠️→URL | link to the flights page is enough: the emitted `url` opens the full booking flow (`--keep-tokens` adds preselected deep links) |
+| Price tracking & alerts | ❌ | login-gated, not portable |
+
+\* approximated: destination list is offline-derived (stale by weeks at worst), prices are live.
 
 ## Output contract
 
@@ -63,12 +67,12 @@ See [`SKILL.md`](SKILL.md) for the complete agent-facing reference (all flags, m
 - **Price insights**: slots `payload[5][1..5]` hold current-cheapest / typical / delta / usual-low / usual-high; the UI renders "Prices are currently high" when current > usual-high.
 - **City entities**: the Airport proto has an undocumented `type` field (1). Setting origin→3 / destination→2 switches Google from strict airport matching to city-level matching, which surfaces partner-operated itineraries (e.g. Gol × Air France SSA↔MAD). Results for city queries are served client-side and gated to real browser sessions, so the CLI emits a ready-made URL instead.
 - **Explore destinations**: derived offline from the public `airline_routes.json` dump rather than Google's internal Explore RPCs — stale by weeks at worst, compensated by live price probes.
-- **Assessed, not ported (browser-gated)**: `GetShoppingResults` (booking options per selected itinerary) requires page-bootstrap session id, cookies and an anti-bot token; anonymous replays return metadata only. `GetExploreDestinations` *does* accept anonymous `f.sid=0` (90+ destinations verified) but requires a Freebase city entity as origin — plain IATA returns HTTP 400 — so it waits on an IATA→entity resolver.
+- **Assessed, not ported**: `GetShoppingResults` (booking options per selected itinerary) requires page-bootstrap session id, cookies and an anti-bot token — and doesn't need porting: the emitted flights-page link opens the whole booking flow. `GetExploreDestinations` *does* accept anonymous `f.sid=0` (90+ destinations verified) but requires a Freebase city entity as origin — plain IATA returns HTTP 400 — so it waits on an IATA→entity resolver.
 
 ## Known limitations
 
 - Grid/calendar prices are route-level estimates, not bookable exact fares (no airline names per cell).
-- Booking options (`GetShoppingResults`) and city-entity itineraries need a real browser session; use the emitted URLs via chrome-devtools/safari MCP.
+- Booking options and city-entity itineraries don't need porting — the emitted flights-page URL (via chrome-devtools/safari MCP when anonymous fetches are gated) is the interface.
 - Undocumented RPCs can change without notice; failures degrade gracefully to `{"ok":false,...,"hint":"workable: ..."}`.
 - Google applies the first leg's airline filter to the whole search (upstream behavior).
 
