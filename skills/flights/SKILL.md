@@ -185,6 +185,8 @@ Optional explore flags:
 - `--explore-limit N` / `--explore-validate` — cap / prune stale
 - `--explore-max-requests N` — request budget (default 15). Explore fans out one Google RPC per destination; big fan-outs are auto-capped to fit the budget (direct routes first) and the run always succeeds — `explore_meta.request_budget` reports coverage (e.g. searched 15 of 181). For full coverage narrow `--airlines`/`--explore-intl`, raise the budget, or loop destinations individually
 - `--explore-time-budget S` — wall-clock budget (default 120s): stops launching new destinations after S seconds and returns partial results with a `time_capped` coverage note
+- `--explore-dests A,B,C` — explicit destination list overriding the dataset-derived one; batch tail coverage in a single command (session, pacing and budgets still apply)
+- `--per-dest-top N` — add `per_dest_top` to output: top-N cheapest in-window periods per destination
 - `--flex-window` / `--min-stay` / `--max-stay` work with explore (stay range must overlap what the window can reach, or the command says so upfront)
 
 ## Long-horizon sweeps (--flex-months)
@@ -193,15 +195,18 @@ Open-ended date questions ("after January", "sometime next summer") should SWEEP
 
 ```
 # contiguous 6-month sweep of one route (window 15 covers each month densely; ~9 RPCs/month)
-scripts/flights-search.py --from SSA --to BCN --date 2027-02-09 --return-date 2027-02-17 --flex-window 15 --flex-months 6
+# ALWAYS carry --min-stay/--max-stay when the user gave a duration — the tool filters cells, agents must not hand-filter
+scripts/flights-search.py --from SSA --to BCN --date 2027-02-09 --return-date 2027-02-17 --flex-window 15 --flex-months 6 --min-stay 9 --max-stay 14
 
-# light sampling across 6 months (3 anchors' worth of requests — good first pass)
-scripts/flights-search.py --from SSA --date 2027-02-10 --return-date 2027-02-19 --airlines G3,AF --explore-intl --flex-window 2 --flex-months 6
+# light sampling across 6 months (3 anchors' worth of requests — good first pass), stay flags included
+scripts/flights-search.py --from SSA --date 2027-02-10 --return-date 2027-02-19 --airlines G3,AF --explore-intl --flex-window 2 --flex-months 6 --min-stay 9 --max-stay 14
 ```
 
 `--flex-months N` (1..12) repeats the window at anchors every 28 days and dedupes cells. Request cost multiplies by N; the explore request/time budgets still auto-cap destinations. Pacing (1s between monthly anchors) keeps anonymous sessions off Google's captcha wall; if you still hit HTTP 429 `/sorry`, wait a few minutes and retry — the error is surfaced in the output hint.
 
 **Agent rule:** for open-ended periods, default to `--flex-months` matching the asked horizon (e.g. "after January" → sweep Feb–Jul: `--flex-months 5..6`). Start with a small window + wide month span; drill down with `--flex-window 15` on the cheapest month only.
+
+**Agent rule for "top-N per destination" questions:** pass `--per-dest-top 3 --min-stay X --max-stay Y` on the FIRST capped sweep and read `per_dest_top` — never hand-filter cells. For destinations the budget didn't cover, follow up with ONE batched command per ~15 destinations using `--explore-dests MAD,LIS,FCO,...` (same flags), not one invocation per destination.
 
 ## Invoking from an agent (minimal context)
 Pass the skill + query + output intent:

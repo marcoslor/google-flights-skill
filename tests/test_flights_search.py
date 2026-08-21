@@ -274,6 +274,23 @@ class ExploreBudgetTests(unittest.TestCase):
         self.assertEqual(fs._explore_request_estimate(10, 15), 90)
 
 
+class PerDestTopTests(unittest.TestCase):
+    def test_top_n_per_destination_sorted_by_price(self):
+        grid = [
+            {"to": "BCN", "price": 5599, "departure": "2027-02-02"},
+            {"to": "AEP", "price": 2309, "departure": "2027-03-09"},
+            {"to": "BCN", "price": 4210, "departure": "2027-02-09"},
+            {"to": "AEP", "price": 2326, "departure": "2027-04-09"},
+            {"to": "BCN", "price": 4756, "departure": "2027-02-11"},
+            {"to": "BCN", "price": 9999, "departure": "2027-03-01"},   # beyond top-3
+            {"to": "MAD", "price": None},                              # error cells skipped
+        ]
+        tops = fs._per_dest_top(grid, 3)
+        self.assertEqual([g["price"] for g in tops["AEP"]], [2309, 2326])
+        self.assertEqual([g["price"] for g in tops["BCN"]], [4210, 4756, 5599])
+        self.assertNotIn("MAD", tops)
+
+
 class MultiAirportTests(unittest.TestCase):
     def test_split_codes(self):
         self.assertEqual(fs._split_codes("SSA,GRU"), ["SSA", "GRU"])

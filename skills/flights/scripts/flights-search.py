@@ -328,6 +328,19 @@ def _stay_overlap(min_stay: int | None, max_stay: int | None, base_stay: int, wi
     return (lo, hi) if lo <= hi else None
 
 
+def _per_dest_top(grid: list[dict[str, Any]], n: int) -> dict[str, list[dict[str, Any]]]:
+    """Top-N cheapest priced periods per destination (client-side)."""
+    tops: dict[str, list[dict[str, Any]]] = {}
+    for g in sorted((g for g in grid if g.get("price") is not None), key=lambda x: x["price"]):
+        dest = g.get("to")
+        if not dest:
+            continue
+        bucket = tops.setdefault(dest, [])
+        if len(bucket) < n:
+            bucket.append(g)
+    return tops
+
+
 def get_public_destinations(
     origin: str,
     airlines_filter: list[str] | None = None,
@@ -1223,6 +1236,8 @@ def main():
     p.add_argument("--explore-scope", choices=["direct", "network"], default="network", help="direct=only routes from --from, network=direct+1-stop via hub (anywhere, general, e.g. SSA->CDG->MAD). Default network for anywhere.")
     p.add_argument("--explore-limit", type=int, default=None, help="cap number of explored destinations (cheapest km first)")
     p.add_argument("--explore-cache-ttl", type=int, default=24, help="cache TTL hours for airline_routes.json (default 24)")
+    p.add_argument("--explore-dests", default=None, help="comma-separated destination codes overriding the dataset-derived list (batch tail coverage: --explore-dests MAD,LIS,FCO)")
+    p.add_argument("--per-dest-top", type=int, default=0, help="include top-N cheapest periods per destination in output as per_dest_top")
     p.add_argument("--explore-max-requests", type=int, default=15, help="auto-cap explore destination list to fit this many Google requests (default 15; anonymous bursts get throttled beyond that)")
     p.add_argument("--explore-time-budget", type=int, default=120, help="stop launching new destinations after this many seconds (default 120) and return partial results with coverage notes")
     # multi-airport / nearby
@@ -1286,6 +1301,13 @@ def main():
             scope=args.explore_scope,
             cache_ttl_h=args.explore_cache_ttl,
         )
+        if args.explore_dests:
+            # Explicit destination list (tail-coverage batches): overrides the
+            # dataset-derived list; dataset still enriches display metadata.
+            wanted = [c.strip().upper() for c in args.explore_dests.split(",") if c.strip()]
+            known = {d["iata"]: d for d in dests}
+            dests = [known.get(c, {"iata": c, "country_code": None, "display_name": c}) for c in wanted]
+            explore_meta["source"] = "explicit --explore-dests"
         if not dests:
             hint = "workable: check --from code, try without --airlines, without --explore-intl, or use --explore-scope network for 1-stop"
             if explore_meta.get("error"):
@@ -1501,12 +1523,10 @@ def main():
                 per_dest[to] = g
 
         count_ok = len([g for g in grid_sorted if g["price"] is not None])
-        # optimization note: for full 2027 time exhaustive, window is ±N around --date
-        # To cover 2027-01..12, run monthly loop externally or extend to date-range flag (future).
         out: dict[str, Any] = {
             "ok": True,
             "mode": mode,
-            "query": {"from": args.from_, "date": args.date, "return_date": args.return_date, "trip": trip, "seat": args.seat, "currency": args.currency, "airlines": args.airlines, "explore": True, "explore_scope": args.explore_scope, "explore_intl": args.explore_intl, "flex_window": args.flex_window, "min_stay": args.min_stay, "max_stay": args.max_stay},
+            "query": {"from": args.from_, "date": args.date, "return_date": args.return_date, "trip": trip, "seat": args.seat, "currency": args.currency, "airlines": args.airlines, "explore": True, "explore_scope": args.explore_scope, "explore_intl": args.explore_intl, "flex_window": args.flex_window, "flex_months": args.flex_months, "min_stay": args.min_stay, "max_stay": args.max_stay},
             "explore_meta": explore_meta,
             "destinations": dests,
             "count": count_ok,
@@ -1516,6 +1536,8 @@ def main():
             "cheapest": cheapest,
             "per_dest_cheapest": per_dest,
         }
+        if args.per_dest_top and args.per_dest_top > 0:
+            out["per_dest_top"] = _per_dest_top(grid_sorted, args.per_dest_top)
         if count_ok == 0:
             out["hint"] = "workable: no flights match - try different dates/weekday, remove --airlines, broaden --flex-window, try --explore-scope network, or check grid[].error/hint per entry"
         print(json.dumps(out, ensure_ascii=False))
