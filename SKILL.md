@@ -73,18 +73,42 @@ No login, no `/verify` wall. If `primp` is blocked (rare), the error detail will
 - `--min-price N` / `--max-price-client N` — client-side price filter (different from server --max-price)
 - `--proxy URL` — e.g. `http://user:pass@host:port` (passed to primp)
 - `--url-only` — only print the Google Flights URL, don't fetch
-- `--raw` — include raw JS payload metadata
+
+**Price context & multi-airport:**
+- `--price-insights` — include Google's price-insights panel (free, same request): `{current_cheapest, typical, usual_low, usual_high, verdict: high|low|normal}`
+- `--price-graph` — include the native 61-day bar graph (parsed from the same fetch, no extra request)
+- `--keep-tokens` — keep per-cell `booking_token` in grid output (for preselected browser flows)
+- `--nearby` / `--nearby-km R` — expand --from/--to with airports within R km (default 120) into one OR-search
+- `--from A,B` / `--to X,Y` — comma-separated airports = one combined OR-search (e.g. `--from SSA,GRU --to MAD`)
+
+## Multi-airport searches (OR semantics)
+
+`--from SSA,GRU --to MAD` returns itineraries departing **either** airport in one sorted result set — the same encoding Google's UI uses for "select multiple airports" (repeated Airport entries in the tfs protobuf; verified live: union of both single-airport baselines).
+
+```
+bin/flights-search.py --from SSA,GRU --to MAD --date 2026-11-05 --return-date 2026-11-12 --currency USD --sort asc --top 4
+# → flights from both SSA and GRU, cheapest first; query.origins/query.destinations echo the sets
+```
+
+Combine with `--nearby` to auto-expand each side with airports within `--nearby-km` (offline geo dataset, haversine):
+
+```
+bin/flights-search.py --from GRU --to MAD --date 2026-11-05 --return-date 2026-11-12 --nearby
+# → GRU + CGH + VCP departures in one search
+```
+
+Not combinable with `--explore`, `--flex-window`, `--legs`, or `/m/` city entities (each emits a workable error).
 
 ## Flexible dates — Date Grid (2-axis table) & Price Graph (bar)
 
 Google Flights' UI has two flexible views, both replicable:
 
-**1. Native price graph (bar, 1 request, fixed stay)**
-`--price-graph` extracts the 61-day graph Google already returns at `payload[5][10][0]` for the *same stay length*. Zero extra cost, but only covers ~today±30d (near-term). Use to find cheapest departure for a fixed duration in the next 2 months.
+**1. Native price graph (bar, fixed stay)**
+`--price-graph` extracts the 61-day graph Google already returns at `payload[5][10][0]` for the *same stay length*. Parsed from the same fetch as the flights — zero extra cost, covers ~today±30d (near-term). Use to find cheapest departure for a fixed duration in the next 2 months.
 
 ```
 bin/flights-search.py --from GRU --to JFK --date 2026-08-25 --return-date 2026-08-30 --price-graph
-# → {"price_graph":[{"date":"2026-07-24","price":331},...],"price_graph_cheapest":{...}}
+# → {"price_graph":[{"date":"2026-07-24","price":331},...],"price_graph_cheapest":{...},"price_insights":{...}}
 ```
 
 **2. Native date grid (2-axis table) — the only flex engine**
@@ -108,11 +132,18 @@ bin/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-0
 # → {"mode":"native-calendar-grid","grid":[...9 cells...],"cheapest":{...}}
 ```
 
-Flexible search is round-trip only (the grid needs both legs). For one-way near-term use `--price-graph`. The native grid is an undocumented Google frontend RPC, not a stable public API — if it changes, the command returns a workable hint.
+*One-way flexible dates* (omit `--return-date`; same RPC, single leg):
+```
+bin/flights-search.py --from GRU --to JFK --date 2026-09-15 --flex-window 3
+# → {"mode":"flex-one-way","grid":[{"departure":"2026-09-17","price":437},...],"cheapest":{...}}
+```
+
+Flexible search works for one-way and round-trip. The native grid is an undocumented Google frontend RPC, not a stable public API — if it changes, the command returns a workable hint.
 
 **Which to use?**
-- Near-term (≤60d) fixed stay → `--price-graph` (1 request, instant).
-- Any flexible round-trip → `--flex-window N` (+ `--min-stay/--max-stay`, or `--flex-grid` for the full matrix).
+- Near-term (≤60d) fixed stay → `--price-graph` (parsed from the search fetch, instant).
+- Flexible one-way → `--flex-window N` (no `--return-date`).
+- Any flexible round-trip → `--flex-window N --return-date ...` (+ `--min-stay/--max-stay`, or `--flex-grid` for the full matrix).
 
 ## City entities — partnership flights (/m/...)
 

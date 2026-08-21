@@ -34,6 +34,7 @@ try:
     from fast_flights import FlightQuery, Passengers, create_query, get_flights
     from fast_flights.exceptions import FlightsNotFound
     from fast_flights.fetcher import fetch_flights_html
+    from fast_flights.parser import parse as parse_flights_html
 
     _HAS_FETCH = True
 except ImportError as e:
@@ -157,30 +158,62 @@ def flight_to_dict(f) -> dict[str, Any]:
     }
 
 
-def extract_price_graph(query) -> list[dict[str, Any]] | None:
-    """Extract native Google price graph (61 days, 1 request, fixed stay).
-
-    Returns list of {date, price} or None if not available.
-    Data lives at payload[5][10][0] = [[timestamp_ms, price], ...].
-    This mirrors GFlights' bar graph for the same stay length.
-    """
+def _payload_from_html(html: str) -> list[Any] | None:
+    """Parse the embedded JS data blob from a fetched search page."""
     try:
         from selectolax.lexbor import LexborHTMLParser
     except ImportError:
         return None
     try:
-        html = fetch_flights_html(query)
         parser = LexborHTMLParser(html)
         script = parser.css_first(r"script.ds\:1")
         if not script:
             return None
         js = script.text()
         data = js.split("data:", 1)[1].rsplit(",", 1)[0]
-        payload = json.loads(data)
-        p5 = payload[5] if len(payload) > 5 else None
+        return json.loads(data)
+    except Exception:
+        return None
+
+
+def extract_price_insights(payload: list[Any] | None) -> dict[str, Any] | None:
+    """Price insights panel — free, same request (payload[5][1..5]).
+
+    Slot semantics verified against the UI ("Prices are currently high"):
+      [5][1]=current cheapest for these dates, [5][2]=typical price,
+      [5][4]/[5][5]=usual low/high band. UI flags "high" when current > high.
+    """
+    if not isinstance(payload, list) or len(payload) <= 5 or not isinstance(payload[5], list) or len(payload[5]) <= 5:
+        return None
+
+    def _price(slot: int) -> int | float | None:
+        try:
+            v = payload[5][slot][1]
+            return v if isinstance(v, (int, float)) else None
+        except Exception:
+            return None
+
+    current, typical, low, high = _price(1), _price(2), _price(4), _price(5)
+    if current is None or low is None or high is None:
+        return None
+    out: dict[str, Any] = {
+        "current_cheapest": current,
+        "typical": typical,
+        "usual_low": low,
+        "usual_high": high,
+        "verdict": "high" if current > high else ("low" if current < low else "normal"),
+    }
+    if typical is not None:
+        out["current_vs_typical"] = current - typical
+    return out
+
+
+def extract_price_graph_from_payload(payload: list[Any] | None) -> list[dict[str, Any]] | None:
+    """Native Google price graph (61 days, fixed stay) at payload[5][10][0]."""
+    try:
+        p5 = payload[5] if isinstance(payload, list) else None
         if not p5 or len(p5) <= 10 or not p5[10]:
             return None
-        # p5[10] is [[ [ts, price], ... ]]
         graph_raw = p5[10][0] if isinstance(p5[10][0], list) and p5[10][0] and isinstance(p5[10][0][0], list) else None
         if not graph_raw:
             return None
@@ -407,9 +440,19 @@ def _is_city(code: str | None) -> bool:
     return bool(code) and str(code).startswith("/m/")
 
 
-def _city_proto_classes():
-    """Airport/FlightData/Info classes extended with the hidden type field."""
-    if "classes" not in _CITY_PROTO_CACHE:
+_EXTENDED_PROTO_CACHE: dict[Any, dict[str, Any]] = {}
+
+
+def _extended_proto_classes(repeat_airports: bool = False) -> dict[str, Any]:
+    """Airport/FlightData/Info classes extended with hidden wire fields.
+
+    - Airport.type (field 1): city entity marker (origin=3, dest=2) that
+      unlocks partner itineraries.
+    - repeated from_airport/to_airport (13/14): multi-airport OR searches
+      (verified live: GRU+SSA -> MAD returns the union of both baselines).
+    """
+    key = bool(repeat_airports)
+    if key not in _EXTENDED_PROTO_CACHE:
         from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
         import fast_flights.pb.flights_pb2 as fpb
@@ -422,13 +465,22 @@ def _city_proto_classes():
         fld.number = 1
         fld.label = 1
         fld.type = 5  # int32
+        if repeat_airports:
+            fd_msg = next(m for m in fdp.message_type if m.name == "FlightData")
+            for f in fd_msg.field:
+                if f.name in ("from_airport", "to_airport"):
+                    f.label = 3  # LABEL_REPEATED
         pool = descriptor_pool.DescriptorPool()
         pool.Add(fdp)
-        _CITY_PROTO_CACHE["classes"] = tuple(
-            message_factory.GetMessageClass(pool.FindMessageTypeByName(name))
-            for name in ("Info", "FlightData", "Airport")
-        )
-    return _CITY_PROTO_CACHE["classes"]
+        get = lambda n: message_factory.GetMessageClass(pool.FindMessageTypeByName(n))
+        _EXTENDED_PROTO_CACHE[key] = {n: get(n) for n in ("Airport", "FlightData", "Info")}
+    return _EXTENDED_PROTO_CACHE[key]
+
+
+def _city_proto_classes():
+    """Backwards-compatible tuple view of the extended classes."""
+    c = _extended_proto_classes(repeat_airports=False)
+    return c["Info"], c["FlightData"], c["Airport"]
 
 
 def city_typed_url(query, origin: str, dest: str) -> str:
@@ -457,6 +509,107 @@ def city_typed_url(query, origin: str, dest: str) -> str:
     hl = f"&hl={query.language}" if query.language else "&hl="
     curr = f"&curr={query.currency}" if query.currency else ""
     return f"https://www.google.com/travel/flights/search?tfs={tfs}{hl}{curr}"
+
+
+def _split_codes(value: str | None) -> list[str]:
+    """Split comma-separated IATA/entity codes: 'SSA,GRU' -> ['SSA','GRU']."""
+    if not value:
+        return []
+    return [c.strip() for c in value.split(",") if c.strip()]
+
+
+def multi_airports_tfs_url(query, per_leg: list[tuple[list[str], list[str]]]) -> str:
+    """Rebuild a query's tfs with repeated airports per leg (OR semantics).
+
+    per_leg matches query.flight_data order: each entry is (from_codes, to_codes).
+    """
+    from base64 import b64encode
+
+    if len(per_leg) != len(query.flight_data):
+        raise ValueError(f"per_leg has {len(per_leg)} entries, query has {len(query.flight_data)} legs")
+    C = _extended_proto_classes(repeat_airports=True)
+    info = C["Info"]()
+    info.ParseFromString(query.to_bytes())
+    new_legs = []
+    for leg_idx, (from_codes, to_codes) in enumerate(per_leg):
+        new_leg = C["FlightData"]()
+        new_leg.CopyFrom(info.data[leg_idx])
+        del new_leg.from_airport[:]
+        del new_leg.to_airport[:]
+        for code in from_codes:
+            new_leg.from_airport.append(C["Airport"](airport=code))
+        for code in to_codes:
+            new_leg.to_airport.append(C["Airport"](airport=code))
+        new_legs.append(new_leg)
+    del info.data[:]
+    info.data.extend(new_legs)
+    tfs = b64encode(info.SerializeToString()).decode()
+    hl = f"&hl={query.language}" if query.language else "&hl="
+    curr = f"&curr={query.currency}" if query.currency else ""
+    return f"https://www.google.com/travel/flights/search?tfs={tfs}{hl}{curr}"
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    import math
+
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 6371.0088 * 2 * math.asin(math.sqrt(a))
+
+
+def expand_nearby(
+    codes: list[str],
+    radius_km: int = 120,
+    limit: int = 8,
+    cache_ttl_h: int = 24,
+) -> tuple[dict[str, list[str]] | None, str | None]:
+    """Expand each airport with neighbors within radius_km (offline dataset).
+
+    Returns ({code: [nearby codes incl. itself]}, error_message|None).
+    """
+    data = _fetch_airline_routes(cache_ttl_h)
+    if not data:
+        return None, "airline_routes.json unavailable (dataset fetch failed and no cache)"
+    out: dict[str, list[str]] = {}
+    for code in codes:
+        entry = data.get(code.upper(), {})
+        try:
+            lat0, lon0 = float(entry.get("latitude")), float(entry.get("longitude"))
+        except (TypeError, ValueError):
+            out[code.upper()] = [code.upper()]
+            continue
+        scored = []
+        for iata, e in data.items():
+            try:
+                d = _haversine_km(lat0, lon0, float(e.get("latitude")), float(e.get("longitude")))
+            except (TypeError, ValueError):
+                continue
+            if d <= radius_km:
+                scored.append((d, iata))
+        scored.sort()
+        out[code.upper()] = [iata for _, iata in scored[:limit]]
+    return out, None
+
+
+def fetch_search_html(url: str, proxy: str | None = None) -> str:
+    """Fetch any Google Flights URL with the same impersonation as fast-flights.
+
+    Needed because fetch_flights_html only accepts Query objects (it mangles
+    plain URLs into ?q=...)."""
+    from primp import Client
+
+    client = Client(
+        impersonate="chrome_145",
+        impersonate_os="macos",
+        referer=True,
+        proxy=proxy,
+        cookie_store=True,
+        timeout=30,
+    )
+    response = client.get(url)
+    response.raise_for_status()
+    return response.text
 
 
 def _city_browser_required(query, origin: str, dest: str, extra: dict[str, Any] | None = None) -> None:
@@ -530,17 +683,18 @@ def _calendar_request_body(
     from_arg: str,
     to_arg: str,
     departure: str,
-    return_date: str,
+    return_date: str | None,
     dep_start: str,
     dep_end: str,
-    ret_start: str,
-    ret_end: str,
+    ret_start: str | None,
+    ret_end: str | None,
     seat: str,
     passengers: dict[str, int],
     filters: dict[str, Any],
     max_price: int | None,
     baggage: dict[str, Any],
 ) -> str:
+    one_way = return_date is None
     seat_number = {"economy": 1, "premium-economy": 2, "business": 3, "first": 4}[seat]
     passenger_list = [
         passengers.get("adults", 0),
@@ -553,10 +707,14 @@ def _calendar_request_body(
     baggage_value = None
     if baggage.get("carry_on") or baggage.get("checked_bags"):
         baggage_value = [baggage.get("carry_on", 0), baggage.get("checked_bags", 0)]
+    legs = [_calendar_leg(from_arg, to_arg, departure, filters)]
+    if not one_way:
+        legs.append(_calendar_leg(to_arg, from_arg, return_date, filters))
     itinerary = [
         None,
         None,
-        1,
+        # Google trip enum: 1 = round-trip, 2 = one-way
+        2 if one_way else 1,
         None,
         [],
         seat_number,
@@ -567,16 +725,13 @@ def _calendar_request_body(
         baggage_value,
         None,
         None,
-        [
-            _calendar_leg(from_arg, to_arg, departure, filters),
-            _calendar_leg(to_arg, from_arg, return_date, filters),
-        ],
+        legs,
         None,
         None,
         None,
         1,
     ]
-    inner = [None, itinerary, [dep_start, dep_end], [ret_start, ret_end]]
+    inner = [None, itinerary, [dep_start, dep_end], None if one_way else [ret_start, ret_end]]
     # The service expects the second f.req item to be a JSON string, not an
     # object. urlencode supplies the same form encoding as the browser.
     # No CSRF token needed: `at` is optional on this endpoint (verified).
@@ -625,25 +780,28 @@ def _calendar_wrb_inners(text: str) -> list[Any]:
 
 
 def _parse_calendar_grid(text: str) -> list[dict[str, Any]]:
+    """Parse grid cells. Round-trip: [dep, ret, [[?, price], token], ...].
+    One-way (single-leg request): [date, null, [[null, price], token], 1]."""
     entries: list[dict[str, Any]] = []
     for inner in _calendar_wrb_inners(text):
         raw_entries = inner[1] if isinstance(inner, list) and len(inner) > 1 else []
         for item in raw_entries if isinstance(raw_entries, list) else []:
             try:
+                if not isinstance(item[0], str):
+                    continue
                 price_data = item[2]
                 price = price_data[0][1]
-                if not isinstance(item[0], str) or not isinstance(item[1], str):
-                    continue
                 if not isinstance(price, (int, float)):
                     continue
-                entries.append(
-                    {
-                        "departure": item[0],
-                        "return": item[1],
-                        "price": price,
-                        "booking_token": price_data[1] if len(price_data) > 1 else None,
-                    }
-                )
+                token = price_data[1] if len(price_data) > 1 else None
+                if isinstance(item[1], str):
+                    entries.append(
+                        {"departure": item[0], "return": item[1], "price": price, "booking_token": token}
+                    )
+                elif item[1] is None:
+                    entries.append(
+                        {"departure": item[0], "return": None, "price": price, "booking_token": token}
+                    )
             except (IndexError, TypeError, KeyError):
                 continue
     return entries
@@ -680,11 +838,11 @@ def _calendar_grid_chunk(
     from_arg: str,
     to_arg: str,
     departure: str,
-    return_date: str,
+    return_date: str | None,
     dep_start: str,
     dep_end: str,
-    ret_start: str,
-    ret_end: str,
+    ret_start: str | None,
+    ret_end: str | None,
     seat: str,
     passengers: dict[str, int],
     baggage: dict[str, Any],
@@ -780,13 +938,17 @@ def _pair_query(
     )
 
 
-def _calendar_pair_url(base_query, departure: str, return_date: str) -> str:
+def _calendar_pair_url(base_query, departure: str, return_date: str | None) -> str:
     """Make a normal Google Flights URL for a native-grid cell."""
-    d0, r0 = base_query.flight_data[0].date, base_query.flight_data[1].date
+    d0 = base_query.flight_data[0].date
+    r0 = base_query.flight_data[1].date if len(base_query.flight_data) > 1 else None
     base_query.flight_data[0].date = departure
-    base_query.flight_data[1].date = return_date
+    if r0 is not None and return_date is not None:
+        base_query.flight_data[1].date = return_date
     url = base_query.url()
-    base_query.flight_data[0].date, base_query.flight_data[1].date = d0, r0
+    base_query.flight_data[0].date = d0
+    if r0 is not None:
+        base_query.flight_data[1].date = r0
     return url
 
 
@@ -804,42 +966,53 @@ def fetch_calendar_grid(
     max_price: int | None,
     concurrency: int,
 ) -> list[dict[str, Any]]:
-    """Fetch the native 2-D calendar, chunking wide windows automatically."""
+    """Fetch the native 2-D calendar, chunking wide windows automatically.
+
+    One-way (base_return=None): only the departure axis is requested; chunks
+    are single rectangles of at most 200 days.
+    """
     dep0 = _parse_date(base_departure)
-    ret0 = _parse_date(base_return)
+    ret0 = _parse_date(base_return) if base_return else None
     dep_start = dep0 - _dt.timedelta(days=window)
     dep_end = dep0 + _dt.timedelta(days=window)
-    ret_start = ret0 - _dt.timedelta(days=window)
-    ret_end = ret0 + _dt.timedelta(days=window)
-    # Build rectangular chunks independently for the two axes. The service
-    # rejects requests with more than 200 cells.
-    ranges = []
-    dep_cursor = dep_start
-    while dep_cursor <= dep_end:
-        dep_chunk_end = min(dep_cursor + _dt.timedelta(days=13), dep_end)
-        dep_days = (dep_chunk_end - dep_cursor).days + 1
-        ret_chunk_days = max(1, _CALENDAR_MAX_CELLS // dep_days)
-        ret_cursor = ret_start
-        while ret_cursor <= ret_end:
-            ret_chunk_end = min(ret_cursor + _dt.timedelta(days=ret_chunk_days - 1), ret_end)
-            ranges.append((dep_cursor, dep_chunk_end, ret_cursor, ret_chunk_end))
-            ret_cursor = ret_chunk_end + _dt.timedelta(days=1)
-        dep_cursor = dep_chunk_end + _dt.timedelta(days=1)
+    ranges: list[tuple[_dt.date, _dt.date, _dt.date | None, _dt.date | None]] = []
+    if ret0 is None:
+        cursor = dep_start
+        while cursor <= dep_end:
+            chunk_end = min(cursor + _dt.timedelta(days=_CALENDAR_MAX_CELLS - 1), dep_end)
+            ranges.append((cursor, chunk_end, None, None))
+            cursor = chunk_end + _dt.timedelta(days=1)
+    else:
+        ret_start = ret0 - _dt.timedelta(days=window)
+        ret_end = ret0 + _dt.timedelta(days=window)
+        # Build rectangular chunks independently for the two axes. The service
+        # rejects requests with more than 200 cells.
+        dep_cursor = dep_start
+        while dep_cursor <= dep_end:
+            dep_chunk_end = min(dep_cursor + _dt.timedelta(days=13), dep_end)
+            dep_days = (dep_chunk_end - dep_cursor).days + 1
+            ret_chunk_days = max(1, _CALENDAR_MAX_CELLS // dep_days)
+            ret_cursor = ret_start
+            while ret_cursor <= ret_end:
+                ret_chunk_end = min(ret_cursor + _dt.timedelta(days=ret_chunk_days - 1), ret_end)
+                ranges.append((dep_cursor, dep_chunk_end, ret_cursor, ret_chunk_end))
+                ret_cursor = ret_chunk_end + _dt.timedelta(days=1)
+            dep_cursor = dep_chunk_end + _dt.timedelta(days=1)
 
     def fetch_range(r):
         a, b, c, d = r
         ref_dep = min(max(dep0, a), b)
-        ref_ret = min(max(ret0, c), d)
+        ref_ret = min(max(ret0, c), d) if ret0 and c and d else None
         return _calendar_grid_chunk(
             session,
             from_arg,
             to_arg,
             ref_dep.isoformat(),
-            ref_ret.isoformat(),
+            ref_ret.isoformat() if ref_ret else None,
             a.isoformat(),
             b.isoformat(),
-            c.isoformat(),
-            d.isoformat(),
+            c.isoformat() if c else None,
+            d.isoformat() if d else None,
             seat,
             passengers,
             baggage,
@@ -860,7 +1033,7 @@ def native_grid_for_route(
     from_arg: str,
     to_arg: str,
     base_departure: str,
-    base_return: str,
+    base_return: str | None,
     window: int,
     currency: str,
     language: str,
@@ -872,6 +1045,7 @@ def native_grid_for_route(
     proxy: str | None,
     concurrency: int,
     session: dict[str, Any] | None = None,
+    keep_tokens: bool = False,
 ) -> tuple[list[dict[str, Any]], Any]:
     """Fetch one route's native calendar and attach normal deep links."""
     base_query = _pair_query(
@@ -904,10 +1078,9 @@ def native_grid_for_route(
     )
     for entry in entries:
         entry["to"] = to_arg
-        entry["url"] = _calendar_pair_url(
-            base_query, entry["departure"], entry["return"]
-        )
-        entry.pop("booking_token", None)
+        entry["url"] = _calendar_pair_url(base_query, entry["departure"], entry["return"])
+        if not keep_tokens:
+            entry.pop("booking_token", None)
     return entries, base_query
 
 
@@ -966,10 +1139,11 @@ def main():
     p.add_argument("--max-price-client", type=int, default=None, help="client-side max price filter")
     p.add_argument("--proxy", default=None)
     p.add_argument("--url-only", action="store_true", help="only print URL, don't fetch")
-    p.add_argument("--raw", action="store_true", help="include raw metadata")
-    # flexible / price graph
-    p.add_argument("--price-graph", action="store_true", help="include native 61-day price graph (1 request, fixed stay) at payload[5][10][0]")
-    p.add_argument("--flex-window", type=int, default=None, help="flexible search: +/- N days around --date (and --return-date). 2 => 5 dates per axis")
+    # flexible / price graph / insights
+    p.add_argument("--price-graph", action="store_true", help="include native 61-day price graph (fixed stay) at payload[5][10][0] — parsed from the same fetch, no extra request")
+    p.add_argument("--price-insights", action="store_true", help="include Google's price insights panel (current/typical/usual band/verdict), free from payload[5]")
+    p.add_argument("--keep-tokens", action="store_true", help="keep per-cell booking_token in grid output (for preselected browser flows)")
+    p.add_argument("--flex-window", type=int, default=None, help="flexible search: +/- N days around --date (and --return-date if set; without it = one-way flex). 2 => 5 dates per axis")
     p.add_argument("--flex-grid", action="store_true", help="with --flex-window, use Google's native 2-axis departure×return calendar (one RPC per <=200-cell chunk). Requires --return-date")
     p.add_argument("--min-stay", type=int, default=None, help="variable stay: min days (requires --max-stay)")
     p.add_argument("--max-stay", type=int, default=None, help="variable stay: max days (requires --min-stay)")
@@ -981,6 +1155,9 @@ def main():
     p.add_argument("--explore-scope", choices=["direct", "network"], default="network", help="direct=only routes from --from, network=direct+1-stop via hub (anywhere, general, e.g. SSA->CDG->MAD). Default network for anywhere.")
     p.add_argument("--explore-limit", type=int, default=None, help="cap number of explored destinations (cheapest km first)")
     p.add_argument("--explore-cache-ttl", type=int, default=24, help="cache TTL hours for airline_routes.json (default 24)")
+    # multi-airport / nearby
+    p.add_argument("--nearby", action="store_true", help="expand --from/--to with airports within --nearby-km (offline dataset, OR-search via repeated tfs airports)")
+    p.add_argument("--nearby-km", type=int, default=120, help="radius for --nearby expansion (default 120 km)")
 
     args = p.parse_args()
 
@@ -1099,6 +1276,7 @@ def main():
                         args.proxy,
                         conc,
                         session=shared_session,
+                        keep_tokens=args.keep_tokens,
                     )
                     grid.extend(entries)
                     total_pairs += len(entries)
@@ -1137,6 +1315,7 @@ def main():
                         args.proxy,
                         conc,
                         session=shared_session,
+                        keep_tokens=args.keep_tokens,
                     )
                     base_cell = next((e for e in entries if e["departure"] == args.date and e["return"] == args.return_date), entries[0] if entries else None)
                     if base_cell:
@@ -1193,6 +1372,24 @@ def main():
         print(json.dumps(out, ensure_ascii=False))
         return
 
+    # ── Multi-airport / nearby-airports normalization ──
+    from_codes_all = _split_codes(args.from_)
+    to_codes_all = _split_codes(args.to)
+    wants_multi = len(from_codes_all) > 1 or len(to_codes_all) > 1
+    if wants_multi or args.nearby:
+        if args.explore or args.flex_window is not None:
+            emit_error("multi-airport (--from a,b) and --nearby can't combine with --explore or --flex-window", hint="workable: run one flexible/explore pass per airport pair instead")
+        if args.legs:
+            emit_error("comma-separated codes need plain --from/--to, not --legs", hint="workable: e.g. --from SSA,GRU --to MAD --date 2026-11-05")
+        if not from_codes_all or not to_codes_all:
+            emit_error("multi-airpoint/--nearby searches need both --from and --to", hint="workable: --from SSA[,GRU] --to MAD[,AGP] --date ... ; 'anywhere' searches are covered by --explore")
+        if any(_is_city(c) for c in from_codes_all + to_codes_all):
+            emit_error("city entities (/m/...) can't combine with multi-airport lists or --nearby", hint="workable: partnership flows take a single pair of city entities")
+    if len(from_codes_all) > 1:
+        args.from_ = from_codes_all[0]
+    if len(to_codes_all) > 1:
+        args.to = to_codes_all[0]
+
     # validation for help when no args
     if not args.legs and not (args.from_ and args.to and args.date):
         if len(sys.argv) == 1:
@@ -1239,6 +1436,30 @@ def main():
         print(json.dumps({"ok": True, "url": url, "query": {"from": args.from_, "to": args.to, "date": args.date, "return_date": args.return_date, "trip": trip, "seat": args.seat}}, ensure_ascii=False))
         return
 
+    # ── Multi-airport / nearby: rewrite tfs with repeated airports ──
+    custom_url = None
+    if wants_multi or args.nearby:
+        if args.nearby:
+            expanded_o, err = expand_nearby(from_codes_all, radius_km=args.nearby_km, cache_ttl_h=args.explore_cache_ttl)
+            if err:
+                emit_error(f"nearby lookup failed: {err}", hint="workable: retry later (dataset cached 24h at ~/.cache/opencode/airline_routes.json) or run without --nearby")
+            expanded_d, err = expand_nearby(to_codes_all, radius_km=args.nearby_km, cache_ttl_h=args.explore_cache_ttl)
+            if err:
+                emit_error(f"nearby lookup failed: {err}", hint="workable: retry later or run without --nearby")
+        else:
+            expanded_o = {c: [c] for c in from_codes_all}
+            expanded_d = {c: [c] for c in to_codes_all}
+        origin_set = list(dict.fromkeys(from_codes_all + [x for c in from_codes_all for x in expanded_o.get(c.upper(), [])]))
+        dest_set = list(dict.fromkeys(to_codes_all + [x for c in to_codes_all for x in expanded_d.get(c.upper(), [])]))
+        per_leg = [(origin_set, dest_set)]
+        if trip == "round-trip":
+            per_leg.append((dest_set, origin_set))
+        try:
+            custom_url = multi_airports_tfs_url(query, per_leg)
+        except Exception as e:
+            emit_error(f"multi-airport tfs build failed: {e}", hint="workable: check codes are plain 3-letter IATA (or repeat the flag with single codes)")
+        url = custom_url
+
     # ── Flexible search: native Date Grid, stay filters applied client-side ──
     if args.flex_window is not None:
         if not args.from_ or not args.to or not args.date:
@@ -1246,8 +1467,9 @@ def main():
         window = args.flex_window
         if window < 0 or window > 15:
             emit_error("--flex-window must be 0..15", hint="workable: use 1 (±1d) 2 (±2d) up to 15, higher = more requests")
-        if not args.return_date:
-            emit_error("flexible search needs --return-date", hint="workable: add --return-date for round-trip grids; for one-way near-term use --price-graph")
+        one_way_flex = args.return_date is None
+        if one_way_flex and (args.min_stay is not None or args.max_stay is not None):
+            emit_error("one-way flexible search has no stay length", hint="workable: drop --min-stay/--max-stay, or add --return-date for round-trip grids")
         if (args.min_stay is None) != (args.max_stay is None):
             emit_error("--min-stay and --max-stay must be given together", hint="workable: pass both, e.g. --min-stay 7 --max-stay 12")
 
@@ -1284,6 +1506,7 @@ def main():
                 args.max_price,
                 args.proxy,
                 conc,
+                keep_tokens=args.keep_tokens,
             )
         except Exception as e:
             detail, hint = _classify_fetch_error(e)
@@ -1301,11 +1524,13 @@ def main():
         # Stay filters on the returned matrix. Default (no --flex-grid, no
         # min/max stay): fixed-stay diagonal — same trip length as base dates.
         def _stay(cell: dict[str, Any]) -> int | None:
-            if cell.get("price") is None:
+            if cell.get("price") is None or cell.get("return") is None:
                 return None
             return (_parse_date(cell["return"]) - _parse_date(cell["departure"])).days
 
-        if args.min_stay is not None and args.max_stay is not None:
+        if one_way_flex:
+            mode = "flex-one-way"
+        elif args.min_stay is not None and args.max_stay is not None:
             mode = "flex-variable-stay"
             grid = [g for g in grid if (s := _stay(g)) is not None and args.min_stay <= s <= args.max_stay]
         elif not args.flex_grid:
@@ -1327,10 +1552,19 @@ def main():
             grid_sorted = [g for g in grid_sorted if g["price"] is not None and g["price"] <= args.max_price_client]
 
         cheapest = next((g for g in grid_sorted if g["price"] is not None), None)
-        # also optionally attach native price graph for context
+        # optionally attach native price graph / insights (1 extra request total)
         native_graph = None
-        if args.price_graph:
-            native_graph = extract_price_graph(query)
+        price_insights = None
+        if args.price_graph or args.price_insights:
+            try:
+                _html = fetch_flights_html(query, proxy=args.proxy)
+                _payload = _payload_from_html(_html)
+                if args.price_graph:
+                    native_graph = extract_price_graph_from_payload(_payload)
+                if args.price_insights:
+                    price_insights = extract_price_insights(_payload)
+            except Exception:
+                pass
 
         count_ok = len([g for g in grid_sorted if g["price"] is not None])
         out = {
@@ -1350,17 +1584,34 @@ def main():
             # also show cheapest in graph for fixed stay
             if native_graph:
                 out["price_graph_cheapest"] = min(native_graph, key=lambda x: x["price"])
+        if args.price_insights:
+            out["price_insights"] = price_insights
         print(json.dumps(out, ensure_ascii=False))
         return
 
-    # ── Native price graph for fixed stay (1 request, no brute-force) ──
+    # ── Unified fetch: flights + optional graph/insights from the same page ──
     native_graph = None
-    if args.price_graph:
-        native_graph = extract_price_graph(query)
-
-    # fetch
+    price_insights = None
+    want_extras = bool(args.price_graph or args.price_insights)
     try:
-        result = get_flights(query, proxy=args.proxy)
+        if custom_url:
+            html = fetch_search_html(custom_url, proxy=args.proxy)
+            result = parse_flights_html(html)
+            payload = _payload_from_html(html)
+            if args.price_graph:
+                native_graph = extract_price_graph_from_payload(payload)
+            if args.price_insights:
+                price_insights = extract_price_insights(payload)
+        elif want_extras:
+            html = fetch_flights_html(query, proxy=args.proxy)
+            result = parse_flights_html(html)
+            payload = _payload_from_html(html)
+            if args.price_graph:
+                native_graph = extract_price_graph_from_payload(payload)
+            if args.price_insights:
+                price_insights = extract_price_insights(payload)
+        else:
+            result = get_flights(query, proxy=args.proxy)
     except FlightsNotFound as e:
         # expected workable outcome: route/date has no schedule (seasonal, past, filter too strict)
         out = {"ok": True, "count": 0, "flights": [], "url": url, "query": {"from": args.from_, "to": args.to, "date": args.date, "return_date": args.return_date, "legs": json.loads(args.legs) if args.legs else None, "trip": trip, "seat": args.seat, "currency": args.currency, "language": args.language}, "metadata": {"airlines": [], "alliances": []}, "hint": "workable: no flights match - try different dates/weekday, remove --airlines/--max-stops, or use --explore for alternatives"}
@@ -1408,6 +1659,10 @@ def main():
         "metadata": meta,
         "url": url,
     }
+    if custom_url:
+        out["query"]["origins"] = from_codes_all
+        out["query"]["destinations"] = to_codes_all
+        out["query"]["nearby"] = bool(args.nearby)
     if len(flights_list) == 0:
         # workable: client filters removed all, or no flights for query - distinction
         out["hint"] = "workable: no flights after filters - try removing --min-price/--max-price-client, broadening dates, or removing --airlines/--max-stops"
@@ -1415,7 +1670,8 @@ def main():
         out["price_graph"] = native_graph
         if native_graph:
             out["price_graph_cheapest"] = min(native_graph, key=lambda x: x["price"])
-            # also bar-graph view slice around requested date if possible
+    if args.price_insights:
+        out["price_insights"] = price_insights
     print(json.dumps(out, ensure_ascii=False))
 
 
