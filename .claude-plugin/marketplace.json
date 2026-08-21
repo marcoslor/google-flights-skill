@@ -1,0 +1,19 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
+  "name": "google-flights-skill",
+  "owner": {
+    "name": "marcoslor"
+  },
+  "metadata": {
+    "version": "1.1.0",
+    "description": "Search Google Flights from the command line — all UI filters, flexible-date grids, price insights, multi-airport and nearby-airport searches."
+  },
+  "plugins": [
+    {
+      "name": "flights",
+      "description": "Fast Google Flights search via the protobuf API — no browser, no anti-bot wall. Filters, flexible dates (one-way and round-trip), price insights/graph, multi-airport and nearby-airport OR-searches, explore-anywhere.",
+      "source": "./skills/flights",
+      "skills": ["./"]
+    }
+  ]
+}
