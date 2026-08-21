@@ -39,8 +39,6 @@ npx skills add marcoslor/google-flights-skill          # project scope
 npx skills add marcoslor/google-flights-skill -g       # global, all projects
 ```
 
-Also indexed at [skills.sh/marcoslor/google-flights-skill](https://skills.sh/marcoslor/google-flights-skill).
-
 Manual setup (library deps only):
 
 ```bash
