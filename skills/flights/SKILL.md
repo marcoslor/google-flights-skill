@@ -164,6 +164,8 @@ The script rewrites the tfs with the hidden Airport.type field (origin city = 3,
 
 ## Explore — any destination (no API key, from anywhere)
 
+**Agent rule for "cheapest across all destinations" questions:** ONE capped explore run IS the answer. Present the results plus the `explore_meta.request_budget` coverage note (e.g. "searched top 15 of 181 destinations") immediately — do NOT loop remaining destinations unless the user explicitly asks for full coverage. Explore runs are request- and time-budgeted so they always finish quickly.
+
 Omit `--to` to explore anywhere from `--from` (any origin worldwide, any `--airlines`, direct + 1-stop via hub, derived from public dataset). Filter with `--explore-intl` (international only).
 
 ```
@@ -182,7 +184,8 @@ Optional explore flags:
 - `--explore-intl` — only international
 - `--explore-limit N` / `--explore-validate` — cap / prune stale
 - `--explore-max-requests N` — request budget (default 15). Explore fans out one Google RPC per destination; big fan-outs are auto-capped to fit the budget (direct routes first) and the run always succeeds — `explore_meta.request_budget` reports coverage (e.g. searched 15 of 181). For full coverage narrow `--airlines`/`--explore-intl`, raise the budget, or loop destinations individually
-- `--flex-window` / `--min-stay` / `--max-stay` work with explore
+- `--explore-time-budget S` — wall-clock budget (default 120s): stops launching new destinations after S seconds and returns partial results with a `time_capped` coverage note
+- `--flex-window` / `--min-stay` / `--max-stay` work with explore (stay range must overlap what the window can reach, or the command says so upfront)
 
 ## Invoking from an agent (minimal context)
 Pass the skill + query + output intent:

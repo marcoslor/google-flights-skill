@@ -302,6 +302,19 @@ def _explore_request_estimate(n_dests: int, window: int | None) -> int:
     return n_dests * (_grid_chunks_for_window(window) if window is not None else 1)
 
 
+def _stay_overlap(min_stay: int | None, max_stay: int | None, base_stay: int, window: int) -> tuple[int, int] | None:
+    """Intersection of the requested stay range and stays reachable at --flex-window.
+
+    Returns (lo, hi), or None when no stay in the requested range can be
+    produced by the window (avoids fetching grids that filter to empty).
+    """
+    if min_stay is None or max_stay is None:
+        return (base_stay - window, base_stay + window)
+    lo = max(min_stay, base_stay - window)
+    hi = min(max_stay, base_stay + window)
+    return (lo, hi) if lo <= hi else None
+
+
 def get_public_destinations(
     origin: str,
     airlines_filter: list[str] | None = None,
@@ -1177,6 +1190,7 @@ def main():
     p.add_argument("--explore-limit", type=int, default=None, help="cap number of explored destinations (cheapest km first)")
     p.add_argument("--explore-cache-ttl", type=int, default=24, help="cache TTL hours for airline_routes.json (default 24)")
     p.add_argument("--explore-max-requests", type=int, default=15, help="auto-cap explore destination list to fit this many Google requests (default 15; anonymous bursts get throttled beyond that)")
+    p.add_argument("--explore-time-budget", type=int, default=120, help="stop launching new destinations after this many seconds (default 120) and return partial results with coverage notes")
     # multi-airport / nearby
     p.add_argument("--nearby", action="store_true", help="expand --from/--to with airports within --nearby-km (offline dataset, OR-search via repeated tfs airports)")
     p.add_argument("--nearby-km", type=int, default=120, help="radius for --nearby expansion (default 120 km)")
@@ -1277,6 +1291,14 @@ def main():
                 emit_error("flexible search needs --return-date", hint="workable: add --return-date for round-trip grids; for one-way near-term use --price-graph")
             if (args.min_stay is None) != (args.max_stay is None):
                 emit_error("--min-stay and --max-stay must be given together", hint="workable: pass both, e.g. --min-stay 7 --max-stay 12")
+            if args.min_stay is not None:
+                base_stay = (_parse_date(args.return_date) - _parse_date(args.date)).days
+                overlap = _stay_overlap(args.min_stay, args.max_stay, base_stay, window)
+                if overlap is None:
+                    emit_error(
+                        f"--min-stay {args.min_stay}..{args.max_stay} has no overlap with stays {base_stay - window}..{base_stay + window} reachable at --flex-window {window}",
+                        hint="workable: increase --flex-window, widen the stay range, or move --date/--return-date",
+                    )
         else:
             if args.min_stay is not None or args.max_stay is not None:
                 emit_error("--min-stay/--max-stay requires --flex-window", hint="workable: add --flex-window N (e.g. 1) to enable variable stay grid")
@@ -1304,7 +1326,17 @@ def main():
             # bootstrap, so a single client serves the whole explore run.
             _probe = _pair_query(args.from_, dests[0]["iata"], args.date, args.return_date, args.currency, args.language, args.seat, passengers_dict, baggage_args, filters) if dests else None
             shared_session = _open_calendar_session(_probe or args, args.proxy, args.currency)
-            for destination in dests:
+            started = time.monotonic()
+            for searched_count, destination in enumerate(dests):
+                if time.monotonic() - started > args.explore_time_budget:
+                    budget_note = explore_meta.setdefault("request_budget", {})
+                    budget_note["time_capped"] = {
+                        "searched_destinations": searched_count,
+                        "skipped_destinations": len(dests) - searched_count,
+                        "budget_seconds": args.explore_time_budget,
+                        "note": "stopped early at the time budget; results above are complete for the destinations searched",
+                    }
+                    break
                 try:
                     entries, _ = native_grid_for_route(
                         args.from_,
@@ -1343,7 +1375,17 @@ def main():
             if not args.return_date:
                 emit_error("explore needs --return-date", hint="workable: add --return-date (native grid is round-trip); for one-way use --to with explicit dates")
             shared_session = _open_calendar_session(args, args.proxy, args.currency)
-            for destination in dests:
+            started = time.monotonic()
+            for searched_count, destination in enumerate(dests):
+                if time.monotonic() - started > args.explore_time_budget:
+                    budget_note = explore_meta.setdefault("request_budget", {})
+                    budget_note["time_capped"] = {
+                        "searched_destinations": searched_count,
+                        "skipped_destinations": len(dests) - searched_count,
+                        "budget_seconds": args.explore_time_budget,
+                        "note": "stopped early at the time budget; results above are complete for the destinations searched",
+                    }
+                    break
                 try:
                     entries, _ = native_grid_for_route(
                         args.from_,
@@ -1518,6 +1560,14 @@ def main():
             emit_error("one-way flexible search has no stay length", hint="workable: drop --min-stay/--max-stay, or add --return-date for round-trip grids")
         if (args.min_stay is None) != (args.max_stay is None):
             emit_error("--min-stay and --max-stay must be given together", hint="workable: pass both, e.g. --min-stay 7 --max-stay 12")
+        if args.min_stay is not None:
+            base_stay = (_parse_date(args.return_date) - _parse_date(args.date)).days
+            overlap = _stay_overlap(args.min_stay, args.max_stay, base_stay, window)
+            if overlap is None:
+                emit_error(
+                    f"--min-stay {args.min_stay}..{args.max_stay} has no overlap with stays {base_stay - window}..{base_stay + window} reachable at --flex-window {window}",
+                    hint="workable: increase --flex-window, widen the stay range, or move --date/--return-date",
+                )
 
         conc = min(max(1, args.flex_concurrency), 5)
         passengers_dict = {"adults": args.adults, "children": args.children, "infants_in_seat": args.infants_seat, "infants_on_lap": args.infants_lap}
