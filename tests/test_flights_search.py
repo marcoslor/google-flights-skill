@@ -16,7 +16,7 @@ REPO = pathlib.Path(__file__).parent.parent
 
 
 def _load_script():
-    spec = importlib.util.spec_from_file_location("flights_search", REPO / "bin" / "flights-search.py")
+    spec = importlib.util.spec_from_file_location("flights_search", REPO / "skills" / "flights" / "scripts" / "flights-search.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

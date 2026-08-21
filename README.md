@@ -5,10 +5,10 @@ Skill + CLI helpers that let AI agents search Google Flights from the command li
 It replicates the full Google Flights web experience: every search filter, flexible-date grids, price insights and graphs, multi-airport and nearby-airport searches, "explore anywhere", even partner-airline itineraries.
 
 ```
-bin/flights-search.py --from GRU --to JFK --date 2026-09-01 --return-date 2026-09-10 --limit 5 --sort asc
+skills/flights/scripts/flights-search.py --from GRU --to JFK --date 2026-09-01 --return-date 2026-09-10 --limit 5 --sort asc
 ```
 
-This repository is a fork of [AWeirdDev/flights](https://github.com/AWeirdDev/flights) (MIT) that adds the CLI (`bin/flights-search.py`) and an [opencode skill](SKILL.md); the upstream library is unchanged and usable on its own.
+This repository is a fork of [AWeirdDev/flights](https://github.com/AWeirdDev/flights) (MIT) that adds the CLI (`skills/flights/scripts/flights-search.py`) and an [opencode skill](SKILL.md); the upstream library is unchanged and usable on its own.
 
 ## Capability matrix (web UI vs CLI)
 
@@ -45,19 +45,19 @@ Errors are always actionable: each failure carries a `hint` describing a workabl
 
 ```bash
 # cheapest nonstops under $800
-bin/flights-search.py --from SFO --to NRT --date 2026-10-01 --max-stops 0 --max-price 800 --currency USD
+skills/flights/scripts/flights-search.py --from SFO --to NRT --date 2026-10-01 --max-stops 0 --max-price 800 --currency USD
 
 # multi-city
-bin/flights-search.py --legs '[{"from":"MYJ","to":"TPE","date":"2026-08-25"},{"from":"TPE","to":"MYJ","date":"2026-08-30"}]'
+skills/flights/scripts/flights-search.py --legs '[{"from":"MYJ","to":"TPE","date":"2026-08-25"},{"from":"TPE","to":"MYJ","date":"2026-08-30"}]'
 
 # flexible round-trip: ±2d around both dates, stays of 7–12 nights
-bin/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2 --min-stay 7 --max-stay 12
+skills/flights/scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2 --min-stay 7 --max-stay 12
 
 # explore anywhere international from SSA on GOL (+partners), direct or 1-stop
-bin/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3 --explore-intl
+skills/flights/scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3 --explore-intl
 
 # partnership itineraries (city entities — returns a URL to open in a real browser session)
-bin/flights-search.py --from /m/09wwlj --to /m/056_y --date 2027-05-30 --return-date 2027-06-09 --airlines G3
+skills/flights/scripts/flights-search.py --from /m/09wwlj --to /m/056_y --date 2027-05-30 --return-date 2027-06-09 --airlines G3
 ```
 
 See [`SKILL.md`](SKILL.md) for the complete agent-facing reference (all flags, modes, output shapes).
@@ -80,13 +80,24 @@ See [`SKILL.md`](SKILL.md) for the complete agent-facing reference (all flags, m
 
 ## Install
 
+As an agent skill (self-contained: SKILL.md + script travel together), via the open [Skills CLI](https://skills.sh) — works with Claude Code, OpenCode, Cursor, Codex, Gemini CLI and 40+ agents:
+
+```shell
+npx skills add marcoslor/flights          # project scope
+npx skills add marcoslor/flights -g       # global, all projects
+```
+
+Also indexed at [skills.sh/marcoslor/flights](https://skills.sh/marcoslor/flights).
+
+Manual (library deps only):
+
 ```bash
 pip install fast-flights        # primp, protobuf, selectolax
-python3 bin/flights-search.py --help
+python3 skills/flights/scripts/flights-search.py --help
 ```
 
 On macOS with Homebrew Python: `/opt/homebrew/bin/pip3.14 install --break-system-packages fast-flights`.
 
 ## Attribution
 
-Forked from [AWeirdDev/flights](https://github.com/AWeirdDev/flights) (MIT) — all credit for the protobuf scraping approach goes upstream. Upstream docs: https://aweirddev.github.io/flights. This fork's additions (`bin/flights-search.py`, `SKILL.md`, the RPC reverse-engineering) are documented above; sponsor banners and integrations from upstream were removed.
+Forked from [AWeirdDev/flights](https://github.com/AWeirdDev/flights) (MIT) — all credit for the protobuf scraping approach goes upstream. Upstream docs: https://aweirddev.github.io/flights. This fork's additions (`skills/flights/scripts/flights-search.py`, `SKILL.md`, the RPC reverse-engineering) are documented above; sponsor banners and integrations from upstream were removed.

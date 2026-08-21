@@ -1,6 +1,12 @@
 ---
 name: flights
-description: Fast Google Flights scraper (fast-flights / AWeirdDev/flights). Search flights via Google Flights protobuf API — no browser, no anti-bot wall. Use when the user wants to find flights, compare prices, or check routes/dates ("find flight GRU to JFK", "cheapest MYJ to TPE", "round-trip SFO to NRT").
+description: Fast Google Flights search via the protobuf API (fast-flights + reverse-engineered RPCs) — no browser, no anti-bot wall. Use when the user wants to find flights, compare prices, check routes or flexible dates, explore destinations from an origin, search multiple airports at once, or find partner-airline itineraries ("find flight GRU to JFK", "cheapest MYJ to TPE", "round-trip SFO to NRT", "flexible dates GRU JFK", "anywhere from SSA on Gol").
+license: MIT
+compatibility: Requires Python 3.10+ with fast-flights installed (pip install fast-flights; needs primp, protobuf, selectolax), network access to google.com, and a shell. Works in opencode and any Agent-Skills-compatible agent.
+metadata:
+  author: marcoslor
+  repository: https://github.com/marcoslor/flights
+  version: "1.1"
 ---
 
 # Flights (Google Flights via fast-flights)
@@ -17,9 +23,9 @@ Filters and sorting are OPTIONAL refinements.
 
 ## The single entry point
 ```
-bin/flights-search.py [flags]
+scripts/flights-search.py [flags]
 # or via python:
-python3 bin/flights-search.py [flags]
+python3 scripts/flights-search.py [flags]
 ```
 It builds the protobuf query, fetches, parses, and prints **one JSON line**. Shapes:
 - `{"ok":true,"query":{"from":"GRU","to":"JFK","date":"2026-09-01",...},"count":N,"flights":[{price,airlines,flights:[{from,to,departure,arrival,duration,plane_type}],carbon}],"metadata":{...},"url":"https://www.google.com/travel/flights/search?tfs=..."}`
@@ -86,14 +92,14 @@ No login, no `/verify` wall. If `primp` is blocked (rare), the error detail will
 `--from SSA,GRU --to MAD` returns itineraries departing **either** airport in one sorted result set — the same encoding Google's UI uses for "select multiple airports" (repeated Airport entries in the tfs protobuf; verified live: union of both single-airport baselines).
 
 ```
-bin/flights-search.py --from SSA,GRU --to MAD --date 2026-11-05 --return-date 2026-11-12 --currency USD --sort asc --top 4
+scripts/flights-search.py --from SSA,GRU --to MAD --date 2026-11-05 --return-date 2026-11-12 --currency USD --sort asc --top 4
 # → flights from both SSA and GRU, cheapest first; query.origins/query.destinations echo the sets
 ```
 
 Combine with `--nearby` to auto-expand each side with airports within `--nearby-km` (offline geo dataset, haversine):
 
 ```
-bin/flights-search.py --from GRU --to MAD --date 2026-11-05 --return-date 2026-11-12 --nearby
+scripts/flights-search.py --from GRU --to MAD --date 2026-11-05 --return-date 2026-11-12 --nearby
 # → GRU + CGH + VCP departures in one search
 ```
 
@@ -107,7 +113,7 @@ Google Flights' UI has two flexible views, both replicable:
 `--price-graph` extracts the 61-day graph Google already returns at `payload[5][10][0]` for the *same stay length*. Parsed from the same fetch as the flights — zero extra cost, covers ~today±30d (near-term). Use to find cheapest departure for a fixed duration in the next 2 months.
 
 ```
-bin/flights-search.py --from GRU --to JFK --date 2026-08-25 --return-date 2026-08-30 --price-graph
+scripts/flights-search.py --from GRU --to JFK --date 2026-08-25 --return-date 2026-08-30 --price-graph
 # → {"price_graph":[{"date":"2026-07-24","price":331},...],"price_graph_cheapest":{...},"price_insights":{...}}
 ```
 
@@ -116,25 +122,25 @@ bin/flights-search.py --from GRU --to JFK --date 2026-08-25 --return-date 2026-0
 
 *Fixed stay* (default; same trip length as base dates):
 ```
-bin/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2
+scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2
 # → {"mode":"flex-fixed-stay","grid":[{"departure":"2026-09-17","return":"2026-09-22","price":773},...],"cheapest":{...}}
 ```
 
 *Variable stay range* (e.g. stay 7–12 nights flexible):
 ```
-bin/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2 --min-stay 7 --max-stay 12
+scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2 --min-stay 7 --max-stay 12
 # → {"mode":"flex-variable-stay","grid":[...]}
 ```
 
 *Full 2-axis matrix* (`--flex-grid` disables the fixed-stay filter):
 ```
-bin/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 1 --flex-grid
+scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 1 --flex-grid
 # → {"mode":"native-calendar-grid","grid":[...9 cells...],"cheapest":{...}}
 ```
 
 *One-way flexible dates* (omit `--return-date`; same RPC, single leg):
 ```
-bin/flights-search.py --from GRU --to JFK --date 2026-09-15 --flex-window 3
+scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --flex-window 3
 # → {"mode":"flex-one-way","grid":[{"departure":"2026-09-17","price":437},...],"cheapest":{...}}
 ```
 
@@ -150,7 +156,7 @@ Flexible search works for one-way and round-trip. The native grid is an undocume
 Google's airline filter is **strict on airport codes**: `--from SSA --to MAD --airlines G3` returns zero even when Gol+Air France partnership itineraries exist. With **Freebase city entities** the partners appear:
 
 ```
-bin/flights-search.py --from /m/09wwlj --to /m/056_y --date 2027-05-30 --return-date 2027-06-09 --airlines G3
+scripts/flights-search.py --from /m/09wwlj --to /m/056_y --date 2027-05-30 --return-date 2027-06-09 --airlines G3
 # → {"ok":false,"reason":"browser-session-required","url":"https://www.google.com/travel/flights/search?tfs=...","hint":"workable: open url via chrome-devtools/safari MCP ..."}
 ```
 
@@ -162,12 +168,12 @@ Omit `--to` to explore anywhere from `--from` (any origin worldwide, any `--airl
 
 ```
 # anywhere from SSA on GOL — direct + 1-stop (AEP + MAD via CDG etc.)
-bin/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3,AF --explore-intl
+scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3,AF --explore-intl
 # same as omit --to (inferred explore):
-bin/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3,AF
+scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3,AF
 
 # exhaustive 7-12d dest × date grid (anywhere)
-bin/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3,AF --explore-intl --flex-window 1 --min-stay 7 --max-stay 12 --currency BRL
+scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3,AF --explore-intl --flex-window 1 --min-stay 7 --max-stay 12 --currency BRL
 # → {"destinations":[...],"grid":[{"to":"AEP","price":2280},...],"cheapest":{...},"per_dest_cheapest":{...}}
 ```
 
@@ -184,19 +190,19 @@ opencode run "Use the flights skill. Search GRU->JFK on 2026-09-01, one-way, eco
 ```
 For round-trip:
 ```
-bin/flights-search.py --from GRU --to JFK --date 2026-09-01 --return-date 2026-09-10 --currency USD --limit 5 --sort asc
+scripts/flights-search.py --from GRU --to JFK --date 2026-09-01 --return-date 2026-09-10 --currency USD --limit 5 --sort asc
 ```
 For multi-city:
 ```
-bin/flights-search.py --legs '[{"from":"MYJ","to":"TPE","date":"2026-08-25"},{"from":"TPE","to":"MYJ","date":"2026-08-30"}]' --seat economy
+scripts/flights-search.py --legs '[{"from":"MYJ","to":"TPE","date":"2026-08-25"},{"from":"TPE","to":"MYJ","date":"2026-08-30"}]' --seat economy
 ```
 For filtered nonstop under $800:
 ```
-bin/flights-search.py --from SFO --to NRT --date 2026-10-01 --max-stops 0 --max-price 800 --currency USD --seat economy
+scripts/flights-search.py --from SFO --to NRT --date 2026-10-01 --max-stops 0 --max-price 800 --currency USD --seat economy
 ```
 For flexible cheapest (GFlights grid):
 ```
-bin/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2 --price-graph
+scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2 --price-graph
 # or 2-axis: add --flex-grid ; variable stay: add --min-stay 3 --max-stay 7
 ```
 
