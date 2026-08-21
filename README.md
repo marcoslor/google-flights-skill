@@ -1,31 +1,34 @@
-# flights-search — Google Flights CLI + skill for agents
+# google-flights-search skill
 
-One-shot Google Flights searches from the command line, designed for LLM agents and scripts: **one invocation, one JSON line**. No browser, no login, no anti-bot wall.
+Search Google Flights from the command line. One command, one JSON result — built for AI agents and scripts. No browser, no login, no anti-bot wall.
+
+It replicates the full Google Flights web experience: every search filter, flexible-date grids, price insights and graphs, multi-airport and nearby-airport searches, "explore anywhere", even partner-airline itineraries.
 
 ```
 bin/flights-search.py --from GRU --to JFK --date 2026-09-01 --return-date 2026-09-10 --limit 5 --sort asc
 ```
 
-This repository is a **fork of [AWeirdDev/flights](https://github.com/AWeirdDev/flights)** (`fast-flights` v3.1.0, MIT) that adds `bin/flights-search.py` — a deterministic JSON-line CLI wrapping the library plus reverse-engineered Google Flights frontend RPCs. The upstream Python package is unchanged and remains usable as a library.
+This repository is a fork of [AWeirdDev/flights](https://github.com/AWeirdDev/flights) (MIT) that adds the CLI (`bin/flights-search.py`) and an [opencode skill](SKILL.md); the upstream library is unchanged and usable on its own.
 
 ## Capability matrix (web UI vs CLI)
 
 | Google Flights web-UI capability | CLI | How |
 |---|---|---|
-| Search one-way / round-trip / multi-city | ✅ | protobuf `tfs` + `primp`, 1 request |
-| Full filter set (stops, airlines/alliances, times, duration, layovers, connections, cabin, passengers, bags, currency, max price, basic-economy) | ✅ | encoded server-side in the query |
-| Flexible dates — round-trip (fixed stay, variable stay, full 2-axis matrix) | ✅ | `--flex-window` (+ `--min-stay/--max-stay`/`--flex-grid`) — native `GetCalendarGrid` RPC |
+| Search one-way / round-trip / multi-city | ✅ | 1 request |
+| Full filter set (stops, airlines/alliances, times, duration, layovers, connections, cabin, passengers, bags, currency, max price) | ✅ | all flags |
+| Flexible dates — round-trip | ✅ | `--flex-window` (+ `--min-stay`/`--max-stay`/`--flex-grid`) |
 | Flexible dates — one-way | ✅ | `--flex-window N` without `--return-date` |
-| Price graph (bar, near-term) | ✅ | `--price-graph` — parsed from the same fetch |
-| Price insights ("typical prices", high/low verdict) | ✅ | `--price-insights` — free from `payload[5][1..5]` |
-| Multiple airports per side ("select multiple airports") | ✅ | `--from SSA,GRU --to MAD` — repeated Airport on tfs fields 13/14 |
-| Nearby-airports toggle | ✅ | `--nearby [--nearby-km R]` — offline geo dataset + haversine |
-| Explore "anywhere" destinations | ✅* | `--explore` — public dataset + live grid probes; official `GetExploreDestinations` RPC assessed but needs an IATA→city-entity resolver |
-| Partner itineraries via city entities (`/m/...`) | ⚠️ | CLI builds the typed URL; results need a real browser session → open via MCP |
-| Booking options / OTA links per itinerary (`GetShoppingResults`) | ⚠️→URL | link to the flights page is enough: the emitted `url` opens the full booking flow (`--keep-tokens` adds preselected deep links) |
-| Price tracking & alerts | ❌ | login-gated, not portable |
+| Price graph (bar) | ⚠️ | `--price-graph` — near-term only (~±30d), fixed stay |
+| Price insights ("typical prices", high/low verdict) | ✅ | `--price-insights` |
+| Multiple airports per side | ✅ | `--from SSA,GRU --to MAD` |
+| Nearby-airports toggle | ✅ | `--nearby [--nearby-km R]` |
+| Explore "anywhere" destinations | ✅* | `--explore` |
+| Partner itineraries via city entities | ⚠️ | CLI emits the URL; open it in a real browser session |
+| Booking options / OTA links per itinerary | ⚠️→URL | link to the flights page is enough — the emitted `url` opens the booking flow |
+| Exact fares & airline names in date grids | ⚠️ | grid/calendar prices are per-date estimates without airline names; exact bookable fares appear when you open a cell's link |
+| Price tracking & alerts | ❌ | login-gated |
 
-\* approximated: destination list is offline-derived (stale by weeks at worst), prices are live.
+\* approximated: destination list comes from a public route dataset (stale by weeks at worst); prices are live.
 
 ## Output contract
 
@@ -71,7 +74,6 @@ See [`SKILL.md`](SKILL.md) for the complete agent-facing reference (all flags, m
 
 ## Known limitations
 
-- Grid/calendar prices are route-level estimates, not bookable exact fares (no airline names per cell).
 - Booking options and city-entity itineraries don't need porting — the emitted flights-page URL (via chrome-devtools/safari MCP when anonymous fetches are gated) is the interface.
 - Undocumented RPCs can change without notice; failures degrade gracefully to `{"ok":false,...,"hint":"workable: ..."}`.
 - Google applies the first leg's airline filter to the whole search (upstream behavior).
