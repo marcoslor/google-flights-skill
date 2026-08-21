@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires Python 3.10+ with fast-flights installed (pip install fast-flights; needs primp, protobuf, selectolax), network access to google.com, and a shell. Works in opencode and any Agent-Skills-compatible agent.
 metadata:
   author: marcoslor
-  repository: https://github.com/marcoslor/flights
+  repository: https://github.com/marcoslor/google-flights-skill
   version: "1.1"
 ---
 
