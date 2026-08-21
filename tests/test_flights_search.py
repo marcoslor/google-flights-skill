@@ -258,6 +258,22 @@ class CityEntityProtoTests(unittest.TestCase):
         self.assertIn("tfs=", url)
 
 
+class ExploreBudgetTests(unittest.TestCase):
+    def test_chunk_estimate_small_windows(self):
+        # windows up to 6 fit a single 200-cell rectangle
+        for w in (0, 1, 2, 6):
+            self.assertEqual(fs._grid_chunks_for_window(w), 1)
+
+    def test_chunk_estimate_large_window(self):
+        # ±15d -> 31x31 cells -> 3x3 rectangles
+        self.assertEqual(fs._grid_chunks_for_window(15), 9)
+
+    def test_request_estimate(self):
+        self.assertEqual(fs._explore_request_estimate(181, None), 181)
+        self.assertEqual(fs._explore_request_estimate(181, 0), 181)
+        self.assertEqual(fs._explore_request_estimate(10, 15), 90)
+
+
 class MultiAirportTests(unittest.TestCase):
     def test_split_codes(self):
         self.assertEqual(fs._split_codes("SSA,GRU"), ["SSA", "GRU"])

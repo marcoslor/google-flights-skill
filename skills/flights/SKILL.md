@@ -181,6 +181,7 @@ Optional explore flags:
 - `--explore` — explicit alias for omit-`--to` (redundant)
 - `--explore-intl` — only international
 - `--explore-limit N` / `--explore-validate` — cap / prune stale
+- `--explore-max-requests N` — request budget (default 40). Explore fans out one Google RPC per destination (per grid chunk); combos above the budget are refused instantly with a workable hint — narrow with `--explore-limit`, drop `--flex-window`, or tighten filters instead of waiting on a timeout
 - `--flex-window` / `--min-stay` / `--max-stay` work with explore
 
 ## Invoking from an agent (minimal context)

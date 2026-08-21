@@ -288,6 +288,20 @@ def _fetch_airline_routes(cache_ttl_h: int = 24) -> dict[str, Any] | None:
         return None
 
 
+def _grid_chunks_for_window(window: int) -> int:
+    """How many ≤200-cell GetCalendarGrid rectangles a ±window request needs."""
+    dep_days = 2 * window + 1
+    dep_chunks = max(1, -(-dep_days // 13))
+    ret_chunk_days = max(1, _CALENDAR_MAX_CELLS // min(dep_days, 13))
+    ret_chunks = max(1, -(-dep_days // ret_chunk_days))
+    return dep_chunks * ret_chunks
+
+
+def _explore_request_estimate(n_dests: int, window: int | None) -> int:
+    """Estimated Google RPC count for an explore run."""
+    return n_dests * (_grid_chunks_for_window(window) if window is not None else 1)
+
+
 def get_public_destinations(
     origin: str,
     airlines_filter: list[str] | None = None,
@@ -1155,6 +1169,7 @@ def main():
     p.add_argument("--explore-scope", choices=["direct", "network"], default="network", help="direct=only routes from --from, network=direct+1-stop via hub (anywhere, general, e.g. SSA->CDG->MAD). Default network for anywhere.")
     p.add_argument("--explore-limit", type=int, default=None, help="cap number of explored destinations (cheapest km first)")
     p.add_argument("--explore-cache-ttl", type=int, default=24, help="cache TTL hours for airline_routes.json (default 24)")
+    p.add_argument("--explore-max-requests", type=int, default=40, help="refuse explore runs estimated above this many Google requests (default 40)")
     # multi-airport / nearby
     p.add_argument("--nearby", action="store_true", help="expand --from/--to with airports within --nearby-km (offline dataset, OR-search via repeated tfs airports)")
     p.add_argument("--nearby-km", type=int, default=120, help="radius for --nearby expansion (default 120 km)")
@@ -1219,6 +1234,24 @@ def main():
             emit_error(f"no destinations found for {args.from_}", hint=hint, extra={"explore_meta": explore_meta})
         if args.explore_limit and args.explore_limit > 0:
             dests = dests[: args.explore_limit]
+
+        # Request-budget guard: explore fans out one RPC per destination (per
+        # grid chunk). Refuse combos that would run for minutes so the agent
+        # can tell the user instead of hanging until the shell timeout.
+        est_requests = _explore_request_estimate(len(dests), args.flex_window)
+        max_requests = max(1, args.explore_max_requests)
+        if est_requests > max_requests:
+            per_dest = _grid_chunks_for_window(args.flex_window) if args.flex_window is not None else 1
+            suggested_limit = max(0, max_requests // per_dest)
+            emit_error(
+                f"explore would issue ~{est_requests} Google requests ({len(dests)} destinations x {per_dest} grid chunk(s) each)",
+                hint=(
+                    "workable: this fan-out exceeds the request budget -- "
+                    f"cap destinations with --explore-limit {suggested_limit}, drop --flex-window for single-pair pricing, "
+                    "narrow --airlines/--explore-intl, or query a few destinations individually"
+                ),
+                extra={"estimated_requests": est_requests, "destinations": len(dests), "chunks_per_destination": per_dest},
+            )
 
         # Flexible dates are served entirely by the native calendar grid;
         # stay filters are applied client-side on the returned matrix.
