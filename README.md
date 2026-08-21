@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://pypi.org/project/fast-flights/)
-[![Tests](https://github.com/marcoslor/google-flights-skill/actions/workflows/tests.yml/badge.svg?branch=dev)]()
+[![Tests](https://github.com/marcoslor/google-flights-skill/actions/workflows/tests.yml/badge.svg?branch=main)]()
 [![Install](https://img.shields.io/badge/install-npx%20skills%20add%20marcoslor%2Fgoogle--flights--skill-000000.svg)](https://skills.sh)
 
 Skill + CLI helpers that let AI agents search Google Flights from the command line, using reverse-engineered Google Flights internals.
