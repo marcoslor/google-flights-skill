@@ -183,7 +183,7 @@ Optional explore flags:
 - `--explore` — explicit alias for omit-`--to` (redundant)
 - `--explore-intl` — only international
 - `--explore-limit N` / `--explore-validate` — cap / prune stale
-- `--explore-max-requests N` — request budget (default 15). Explore fans out one Google RPC per destination; big fan-outs are auto-capped to fit the budget (direct routes first) and the run always succeeds — `explore_meta.request_budget` reports coverage (e.g. searched 15 of 181). For full coverage narrow `--airlines`/`--explore-intl`, raise the budget, or loop destinations individually
+- `--explore-max-requests N` — request budget (default 15). Explore fans out one Google RPC per destination; big fan-outs are auto-capped to fit the budget — direct routes first, then nearest destinations by distance (not alphabetical) — and the run always succeeds; `explore_meta.request_budget` reports coverage (e.g. searched 15 of 181). For full coverage narrow `--airlines`/`--explore-intl`, raise the budget, or batch tail coverage with `--explore-dests`
 - `--explore-time-budget S` — wall-clock budget (default 120s): stops launching new destinations after S seconds and returns partial results with a `time_capped` coverage note
 - `--explore-dests A,B,C` — explicit destination list overriding the dataset-derived one; batch tail coverage in a single command (session, pacing and budgets still apply)
 - `--per-dest-top N` — add `per_dest_top` to output: top-N cheapest in-window periods per destination

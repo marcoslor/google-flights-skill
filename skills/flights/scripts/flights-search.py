@@ -458,7 +458,13 @@ def get_public_destinations(
                     "min": r.get("min"),
                     "via": hub,
                 }
-        dests = sorted(seen.values(), key=lambda x: (x["via"] is not None, x["iata"]))
+        # Budget caps keep the head of this list — order by proximity (km) so
+        # capped sweeps probe plausibly-cheap nearby destinations first instead
+        # of an alphabetical census of the letter A.
+        dests = sorted(
+            seen.values(),
+            key=lambda x: (x["via"] is not None, x.get("km") if x.get("km") is not None else 99999),
+        )
         meta["count"] = len(dests)
         meta["direct"] = len(direct_hubs)
         return dests, meta
@@ -1337,7 +1343,7 @@ def main():
                 "requested_destinations": requested_count,
                 "searched_destinations": len(dests),
                 "estimated_requests": len(dests) * per_dest,
-                "note": "direct routes kept first; narrow --airlines/--explore-intl or loop destinations individually for full coverage",
+                "note": "direct routes kept first, then nearest destinations by distance; narrow --airlines/--explore-intl or batch tail coverage with --explore-dests",
             }
 
         # Flexible dates are served entirely by the native calendar grid;
