@@ -221,7 +221,7 @@ scripts/flights-search.py --from SSA --date 2027-02-10 --return-date 2027-02-19 
 
 **Agent rule:** for open-ended periods, default to `--flex-months` matching the asked horizon (e.g. "after January" → sweep Feb–Jul: `--flex-months 5..6`). Start with a small window + wide month span; drill down with `--flex-window 15` on the cheapest month only.
 
-**Agent rule for "top-N per destination" questions:** pass `--per-dest-top 3 --min-stay X --max-stay Y` on the FIRST capped sweep and read `per_dest_top` — never hand-filter cells. For destinations the budget didn't cover, follow up with ONE batched command per ~15 destinations using `--explore-dests MAD,LIS,FCO,...` (same flags), not one invocation per destination.
+**Agent rule for "top-N per destination" questions:** pass `--per-dest-top 3 --min-stay X --max-stay Y` on the FIRST capped sweep AND on every `--explore-dests` batch (so you never stitch outputs by hand), then merge `per_dest_top` maps. For destinations the budget didn't cover, follow up with ONE batched command per ~15 destinations using `--explore-dests MAD,LIS,FCO,...` (same flags), not one invocation per destination.
 
 ## Invoking from an agent (minimal context)
 Pass the skill + query + output intent:
