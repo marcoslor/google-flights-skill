@@ -42,6 +42,32 @@ except ImportError as e:
     sys.exit(1)
 
 
+def _keep_flights_with_any_airline(result, flights_list: list[dict[str, Any]], codes: str) -> list[dict[str, Any]]:
+    """Client-side filter: keep itineraries whose carriers include any of `codes`.
+
+    `airlines` in parsed results holds carrier NAMES ("Gol"), while users pass
+    CODES ("G3") — resolve via the result's airline metadata table. Implements
+    'Gol required, partner metal fills the gaps': search --airlines G3,AF
+    (server OR-filter, surfaces mixed itineraries) then require G3 presence so
+    pure-partner trips (e.g. all-AF CDG->ALG) are dropped.
+    """
+    want: set[str] = set()
+    meta_by_code: dict[str, str] = {}
+    try:
+        for a in result.metadata.airlines:
+            meta_by_code[a.code.upper()] = a.name.upper()
+            if a.code.upper() in {c.strip().upper() for c in codes.split(",")}:
+                want.add(a.name.upper())
+    except Exception:
+        pass
+    for c in codes.split(","):
+        want.add(c.strip().upper())
+    return [
+        f for f in flights_list
+        if any(str(a).strip().upper() in want for a in (f.get("airlines") or []))
+    ]
+
+
 def emit_error(detail: str, hint: str | None = None, extra: dict[str, Any] | None = None, exit_code: int = 1):
     payload: dict[str, Any] = {"ok": False, "reason": "error", "detail": detail}
     if hint:
@@ -1208,6 +1234,7 @@ def main():
     # per-leg filters
     p.add_argument("--max-stops", type=int, default=None)
     p.add_argument("--airlines", default=None, help="comma-separated IATA or alliance, e.g. JL,ONEWORLD")
+    p.add_argument("--include-airlines", default=None, help="client-side: require these carriers in the itinerary (any segment) — partnership recipe: --airlines G3,AF --include-airlines G3 = Gol required, AF fills the gaps")
     p.add_argument("--connecting", default=None, help="comma-separated connecting airport codes")
     p.add_argument("--earliest-departure", type=int, default=None)
     p.add_argument("--latest-departure", type=int, default=None)
@@ -1528,6 +1555,8 @@ def main():
             if to not in per_dest and g.get("price") is not None:
                 per_dest[to] = g
 
+        if args.include_airlines:
+            explore_meta["note"] = "--include-airlines ignored in grid modes: cells carry no airline names; verify carriers via the cell url"
         count_ok = len([g for g in grid_sorted if g["price"] is not None])
         out: dict[str, Any] = {
             "ok": True,
@@ -1783,6 +1812,8 @@ def main():
             out["hint"] = "workable: no flights in grid - try different dates/weekday, remove --airlines/--max-stops, increase --flex-window, or add --price-graph for near-term"
             if first_error:
                 out["hint"] += f" | last fetch error: {first_error[0][:120]} — {first_error[1]}"
+        if args.include_airlines:
+            out["notes"] = ["--include-airlines ignored in grid modes: cells carry no airline names; verify carriers via the cell url"]
         if native_graph is not None:
             out["price_graph"] = native_graph
             # also show cheapest in graph for fixed stay
@@ -1828,6 +1859,12 @@ def main():
     # result is ResultList
     flights_list = [flight_to_dict(f) for f in result]
 
+    # partnership semantics: server filter is an OR across the ecosystem
+    # (--airlines G3,AF); this client pass requires the anchor carrier.
+    if args.include_airlines:
+        flights_list = _keep_flights_with_any_airline(result, flights_list, args.include_airlines)
+        out_note = f"filtered to itineraries including {args.include_airlines.upper()}"
+
     # client-side filters
     if args.min_price is not None:
         flights_list = [f for f in flights_list if f["price"] >= args.min_price]
@@ -1857,7 +1894,7 @@ def main():
 
     out = {
         "ok": True,
-        "query": {"from": args.from_, "to": args.to, "date": args.date, "return_date": args.return_date, "legs": json.loads(args.legs) if args.legs else None, "trip": trip, "seat": args.seat, "currency": args.currency, "language": args.language, "max_price": args.max_price},
+        "query": {"from": args.from_, "to": args.to, "date": args.date, "return_date": args.return_date, "legs": json.loads(args.legs) if args.legs else None, "trip": trip, "seat": args.seat, "currency": args.currency, "language": args.language, "max_price": args.max_price, "include_airlines": args.include_airlines},
         "count": len(flights_list),
         "flights": flights_list,
         "metadata": meta,
@@ -1867,9 +1904,13 @@ def main():
         out["query"]["origins"] = from_codes_all
         out["query"]["destinations"] = to_codes_all
         out["query"]["nearby"] = bool(args.nearby)
+    if args.include_airlines and out_note:
+        out["notes"] = [out_note]
     if len(flights_list) == 0:
         # workable: client filters removed all, or no flights for query - distinction
         out["hint"] = "workable: no flights after filters - try removing --min-price/--max-price-client, broadening dates, or removing --airlines/--max-stops"
+        if args.include_airlines:
+            out["hint"] = "workable: no itineraries include the required carrier — drop --include-airlines to see the raw ecosystem, or widen --airlines"
     if native_graph is not None:
         out["price_graph"] = native_graph
         if native_graph:

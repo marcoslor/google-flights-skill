@@ -291,6 +291,44 @@ class PerDestTopTests(unittest.TestCase):
         self.assertNotIn("MAD", tops)
 
 
+class IncludeAirlinesTests(unittest.TestCase):
+    """Partnership semantics: --airlines G3,AF (server OR) + --include-airlines G3
+    (client pass) must keep only itineraries that actually touch Gol."""
+
+    class _Meta:
+        class _A:
+            def __init__(self, code, name):
+                self.code, self.name = code, name
+        airlines = [_A("G3", "Gol"), _A("AF", "Air France")]
+
+    def _run(self, flights, codes="G3"):
+        import types
+        result = types.SimpleNamespace(metadata=self._Meta())
+        return fs._keep_flights_with_any_airline(result, flights, codes)
+
+    def test_keeps_itineraries_touching_gol_by_name(self):
+        flights = [
+            {"airlines": ["Gol", "Air France"]},     # mixed partnership — keep
+            {"airlines": ["Gol"]},                    # pure Gol — keep
+        ]
+        out = self._run(flights)
+        self.assertEqual(len(out), 2)
+
+    def test_drops_pure_partner_trips(self):
+        flights = [
+            {"airlines": ["Air France"]},             # all-AF Algiers-style — drop
+            {"airlines": ["Air France", "KLM"]},      # drop
+            {"airlines": ["LATAM"]},                  # drop
+        ]
+        self.assertEqual(self._run(flights), [])
+
+    def test_accepts_code_or_name_in_flag(self):
+        flights = [{"airlines": ["Gol"]}]
+        self.assertEqual(len(self._run(flights, codes="g3")), 1)
+        self.assertEqual(len(self._run(flights, codes="GOL")), 1)
+        self.assertEqual(len(self._run(flights, codes="Gol")), 1)
+
+
 class MultiAirportTests(unittest.TestCase):
     def test_split_codes(self):
         self.assertEqual(fs._split_codes("SSA,GRU"), ["SSA", "GRU"])

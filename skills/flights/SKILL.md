@@ -151,16 +151,31 @@ Flexible search works for one-way and round-trip. The native grid is an undocume
 - Flexible one-way → `--flex-window N` (no `--return-date`).
 - Any flexible round-trip → `--flex-window N --return-date ...` (+ `--min-stay/--max-stay`, or `--flex-grid` for the full matrix).
 
-## City entities — partnership flights (/m/...)
+## Airline filtering & partnerships — READ BEFORE USING --airlines
 
-Google's airline filter is **strict on airport codes**: `--from SSA --to MAD --airlines G3` returns zero even when Gol+Air France partnership itineraries exist. With **Freebase city entities** the partners appear:
+Google's airline filter means **every segment** of an itinerary must match. Mixed
+itineraries (Gol + partner metal) vanish under a single-airline filter:
 
 ```
-scripts/flights-search.py --from /m/09wwlj --to /m/056_y --date 2027-05-30 --return-date 2027-06-09 --airlines G3
-# → {"ok":false,"reason":"browser-session-required","url":"https://www.google.com/travel/flights/search?tfs=...","hint":"workable: open url via chrome-devtools/safari MCP ..."}
+--airlines G3            SSA→MAD  →  ZERO results (the AF leg kills the itinerary)
+--airlines G3,AF         SSA→MAD  →  mixed itineraries AND pure-AF trips to cities GOL never serves (Algiers, Abuja...)
 ```
 
-The script rewrites the tfs with the hidden Airport.type field (origin city = 3, destination city = 2) so the URL shows partner flights. City results are served client-side and gated to real browser sessions, so the script returns the ready-made URL instead of fetching: open it via chrome-devtools/safari MCP and read the result cards.
+### Decision table — pick by intent
+
+| User says | Command | Result |
+|---|---|---|
+| "só Gol" (strict, accept gaps) | `--airlines G3` | only all-GOL itineraries; zero on partner-only routes |
+| **"Gol com parceria"** (Gol required, partner fills the rest) | `--airlines G3,AF --include-airlines G3` | JSON: only itineraries containing ≥1 Gol segment (e.g. `SSA>GIG` Gol + `GIG>CDG>MAD` AF) |
+| "Gol ou AF, não importa quem opera" | `--airlines G3,AF` | whole ecosystem incl. pure-AF trips — usually NOT what people mean |
+| Google's native city-level partnership view | `/m/...` entities + `--airlines G3` | most faithful; browser-gated → tool returns URL only |
+
+### Rules
+
+1. If the user mentions partnership ("com parceria", "via parceira"), NEVER use bare `--airlines G3` with airport codes — it silently returns zero.
+2. The headless recipe is always: ecosystem server-filter (`--airlines G3,AF`) + anchor client-filter (`--include-airlines G3`). Output carries `"notes": ["filtered to itineraries including G3"]`.
+3. `--include-airlines` accepts codes or names (`G3`, `GOL`, `Gol`) and applies ONLY to itinerary results. Grid/flex/explore cells carry no carrier names — the output adds a note saying so; verify carriers via the cell `url`.
+4. City entities (`/m/...`) are Google's own partnership mechanism but need a real browser session: the CLI rewrites the tfs with the hidden `Airport.type` field (origin city=3, dest city=2) and returns `{"ok":false,"reason":"browser-session-required","url":...}` — open via chrome-devtools/safari MCP and read result cards.
 
 ## Explore — any destination (no API key, from anywhere)
 
