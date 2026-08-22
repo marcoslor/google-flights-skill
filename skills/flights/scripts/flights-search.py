@@ -1133,8 +1133,16 @@ def fetch_calendar_grid(
         )
 
     entries: list[dict[str, Any]] = []
+    # Stagger chunk submissions: dense sweeps (window 15) burst 9+ requests at
+    # once and instantly trip Google's throttle; pacing keeps I/O overlapped
+    # while staying under the burst threshold.
+    _CHUNK_PACING_S = 0.8
     with ThreadPoolExecutor(max_workers=min(max(1, concurrency), 5)) as ex:
-        futures = [ex.submit(fetch_range, r) for r in ranges]
+        futures = []
+        for i, r in enumerate(ranges):
+            if i:
+                time.sleep(_CHUNK_PACING_S)
+            futures.append(ex.submit(fetch_range, r))
         for future in as_completed(futures):
             entries.extend(future.result())
     deduped = {(e["departure"], e["return"]): e for e in entries}
