@@ -1,8 +1,7 @@
 ---
 name: flights
-description: Fast Google Flights search via the protobuf API (fast-flights + reverse-engineered RPCs) — no browser, no anti-bot wall. Use when the user wants to find flights, compare prices, check routes or flexible dates, explore destinations from an origin, search multiple airports at once, or find partner-airline itineraries ("find flight GRU to JFK", "cheapest MYJ to TPE", "round-trip SFO to NRT", "flexible dates GRU JFK", "anywhere from SSA on Gol").
+description: Fast Google Flights search via the protobuf API (fast-flights + reverse-engineered RPCs) — no browser, no anti-bot wall. Use when the user wants to find flights, compare prices, check routes or flexible dates, explore destinations from an origin, search multiple airports at once, or find partner-airline itineraries ("find flight GRU to JFK", "cheapest MYJ to TPE", "round-trip SFO to NRT", "flexible dates GRU JFK", "anywhere from SSA on Gol"). When the user restricts airlines, clarify strict operating-carrier versus partner/codeshare intent before searching.
 license: MIT
-compatibility: Requires Python 3.10+ with fast-flights installed (pip install fast-flights; needs primp, protobuf, selectolax), network access to google.com, and a shell. Works in opencode and any Agent-Skills-compatible agent.
 metadata:
   author: marcoslor
   repository: https://github.com/marcoslor/google-flights-skill
@@ -20,6 +19,16 @@ The ONLY context the invoking agent needs:
 - **what to return** (e.g. "top 5 cheapest", "nonstop only", "round-trip")
 
 Filters and sorting are OPTIONAL refinements.
+
+## Airline intent — clarify before filtering
+
+Whenever the user says **"only [airline]"**, asks to exclude airlines, or otherwise requests an airline restriction, ask which meaning they intend before searching if partner semantics are not explicit:
+
+1. **Strict operating carrier** — every segment must be operated by the named airline (e.g. `G3` only).
+2. **Anchor carrier plus partners** — the itinerary must contain at least one segment operated by the named airline, while partner airlines may operate the remaining segments; normally require one ticket and no self-transfer.
+3. **Sold/bookable through the airline or loyalty program** — partner-only flights may be acceptable if the user explicitly allows them.
+
+Do not assume that “find me GOL” means `--airlines G3`. That strict Google filter can hide valid GOL + Air France/KLM/other-partner itineraries. If the user does not answer, state the assumption before proceeding; for destination-discovery requests, prefer asking the clarification.
 
 ## The single entry point
 ```
@@ -151,7 +160,7 @@ Flexible search works for one-way and round-trip. The native grid is an undocume
 - Flexible one-way → `--flex-window N` (no `--return-date`).
 - Any flexible round-trip → `--flex-window N --return-date ...` (+ `--min-stay/--max-stay`, or `--flex-grid` for the full matrix).
 
-## Airline filtering & partnerships — READ BEFORE USING --airlines
+## Airline filtering & partnerships — READ BEFORE USING `--airlines`
 
 Google's airline filter means **every segment** of an itinerary must match. Mixed
 itineraries (Gol + partner metal) vanish under a single-airline filter:
@@ -160,6 +169,22 @@ itineraries (Gol + partner metal) vanish under a single-airline filter:
 --airlines G3            SSA→MAD  →  ZERO results (the AF leg kills the itinerary)
 --airlines G3,AF         SSA→MAD  →  mixed itineraries AND pure-AF trips to cities GOL never serves (Algiers, Abuja...)
 ```
+
+### Default for GOL + partner discovery: fetch broadly, then post-filter
+
+For an exact route/date search where the user wants itineraries containing GOL but has not selected a single partner ecosystem, omit `--airlines` and post-filter the fetched results:
+
+```
+scripts/flights-search.py --from SSA --to BCN --date 2027-03-03 \
+  --return-date 2027-03-13 --include-airlines G3 \
+  --hide-separate --limit 50 --sort asc
+```
+
+This lets Google return GOL + Air France, GOL + KLM, GOL + other partners, and GOL-only options before the client keeps itineraries containing GOL. Use `--hide-separate` when “bookable” means one ticket/no self-transfer.
+
+This is not by itself exhaustive: Google returns a ranked, finite result set. For an exhaustive partner sweep, also run explicit searches for the relevant official partner ecosystems, deduplicate, and verify the ticketing/carrier combination.
+
+For flexible date grids and `--explore`, calendar cells do not carry carrier names and `--include-airlines` is ignored. Use an unfiltered grid only to discover candidate destination/date pairs, then run an exact unfiltered search with `--include-airlines G3` for every candidate before presenting it as a GOL itinerary. Never present a grid-only price as verified GOL availability.
 
 ### Decision table — pick by intent
 
@@ -172,8 +197,9 @@ itineraries (Gol + partner metal) vanish under a single-airline filter:
 
 ### Rules
 
+0. If the user requests an airline filter without clearly stating strict operating-carrier versus partner/codeshare intent, ask the clarification above before searching.
 1. If the user mentions partnership ("com parceria", "via parceira"), NEVER use bare `--airlines G3` with airport codes — it silently returns zero.
-2. The headless recipe is always: ecosystem server-filter (`--airlines G3,AF`) + anchor client-filter (`--include-airlines G3`). Output carries `"notes": ["filtered to itineraries including G3"]`.
+2. Use the unfiltered exact-search recipe (`--include-airlines G3`, no `--airlines`) for broad GOL-partner discovery. Use the ecosystem server-filter (`--airlines G3,AF`) + anchor client-filter (`--include-airlines G3`) only when the user explicitly selected the Air France ecosystem or when a partner-specific probe is needed. Output carries `"notes": ["filtered to itineraries including G3"]`.
 3. `--include-airlines` accepts codes or names (`G3`, `GOL`, `Gol`) and applies ONLY to itinerary results. Grid/flex/explore cells carry no carrier names — the output adds a note saying so; verify carriers via the cell `url`.
 4. City entities (`/m/...`) are Google's own partnership mechanism but need a real browser session: the CLI rewrites the tfs with the hidden `Airport.type` field (origin city=3, dest city=2) and returns `{"ok":false,"reason":"browser-session-required","url":...}` — open via chrome-devtools/safari MCP and read result cards.
 
