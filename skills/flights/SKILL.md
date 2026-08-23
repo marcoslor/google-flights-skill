@@ -196,7 +196,7 @@ python3 scripts/airline-destinations.py \
   --max-hops 2 --international --format json
 ```
 
-It fetches Jonty's public weekly route JSON and returns candidate destination airports with route paths and carrier provenance. The output intentionally reports `exhaustive: false`: this is not a complete list of an airline's bookable destinations and may omit codeshares, partner-marketed, interline, seasonal, or date-specific destinations. It does not store a database and does not verify fares; the caller/LLM owns piping or fanning out the returned `destinations` into exact `flights-search.py` calls.
+It fetches Jonty's public weekly route JSON and returns candidate destination airports with route paths and carrier provenance. The output includes a prominent `note` explaining that it is not a complete list of an airline's bookable destinations and may omit codeshares, partner-marketed, interline, seasonal, or date-specific destinations. It does not store a database and does not verify fares; the caller/LLM owns piping or fanning out the returned `destinations` into exact `flights-search.py` calls.
 
 This supersedes `--explore` for airline-scoped “anywhere” requests: inventory chooses the candidate universe, and exact flight searches provide the live price/bookability check.
 

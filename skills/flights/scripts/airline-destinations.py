@@ -172,12 +172,7 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             "max_hops": args.max_hops,
             "international": args.international,
         },
-        "exhaustive": False,
-        "coverage": {
-            "exhaustive": False,
-            "kind": "route-graph-candidates",
-            "warning": NON_EXHAUSTIVE_WARNING,
-        },
+        "note": NON_EXHAUSTIVE_WARNING,
         "count": len(destinations),
         "destinations": destinations,
         "notes": [
