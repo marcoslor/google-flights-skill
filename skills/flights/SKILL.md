@@ -196,7 +196,7 @@ python3 scripts/airline-destinations.py \
   --max-hops 2 --international --format json
 ```
 
-It fetches Jonty's public weekly route JSON and returns candidate destination airports with route paths and carrier provenance. It does not store a database and does not verify fares; the caller/LLM owns piping or fanning out the returned `destinations` into exact `flights-search.py` calls.
+It fetches Jonty's public weekly route JSON and returns candidate destination airports with route paths and carrier provenance. The output intentionally reports `exhaustive: false`: this is not a complete list of an airline's bookable destinations and may omit codeshares, partner-marketed, interline, seasonal, or date-specific destinations. It does not store a database and does not verify fares; the caller/LLM owns piping or fanning out the returned `destinations` into exact `flights-search.py` calls.
 
 This supersedes `--explore` for airline-scoped “anywhere” requests: inventory chooses the candidate universe, and exact flight searches provide the live price/bookability check.
 
@@ -217,6 +217,10 @@ python3 scripts/airline-destinations.py \
 ```
 
 In anchor mode, the first route-graph edge must contain the anchor airline; later edges may contain any code in `--airlines`. Supply the partner codes appropriate to the user's stated partnership scope. Do not infer that every airline in the route dataset is a commercial partner. The route output is a candidate list; verify each destination/date with an unfiltered exact search plus `--include-airlines G3` and `--hide-separate`.
+
+### Mandatory disclosure for airline-destination discovery
+
+When the user's intent is to discover or list an airline's destinations, tell them before presenting results: **"This is a non-exhaustive candidate list, not a complete list of all destinations bookable through the airline."** Do not call the output "all destinations" or imply that a missing city is unavailable. Distinguish route-data candidates from destinations verified by a live, date-specific search.
 
 ### Decision table — pick by intent
 

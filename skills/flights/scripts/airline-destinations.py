@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Generate flight-search destination candidates from Jonty's route graph.
+"""Generate non-exhaustive flight-search destination candidates from Jonty's route graph.
 
 This is a stateless producer: it fetches the public route JSON, emits one JSON
 object (or JSONL destination records), and never stores a local database.
-It discovers candidate airports; a live flight search must still verify dates,
-fares, and availability.
+It discovers candidate airports; it is not a complete airline/bookable-destination
+database. A live flight search must still verify dates, fares, and availability.
 """
 
 from __future__ import annotations
@@ -25,6 +25,12 @@ DEFAULT_URL = (
 )
 AIRPORT_RE = re.compile(r"^[A-Z0-9]{3}$")
 AIRLINE_RE = re.compile(r"^[A-Z0-9]{2,3}$")
+NON_EXHAUSTIVE_WARNING = (
+    "NOT EXHAUSTIVE: this is only a candidate list from Jonty's route graph, "
+    "limited by the fetched dataset, carrier-edge matching, and --max-hops. "
+    "It may omit codeshares, partner-marketed, interline, seasonal, or "
+    "date-specific bookable destinations."
+)
 
 
 def _error(detail: str, exit_code: int = 1) -> None:
@@ -166,9 +172,16 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             "max_hops": args.max_hops,
             "international": args.international,
         },
+        "exhaustive": False,
+        "coverage": {
+            "exhaustive": False,
+            "kind": "route-graph-candidates",
+            "warning": NON_EXHAUSTIVE_WARNING,
+        },
         "count": len(destinations),
         "destinations": destinations,
         "notes": [
+            NON_EXHAUSTIVE_WARNING,
             "Candidates come from route data; verify dates, fares, and ticketing with live flight search.",
             "In anchor mode, the first edge must contain the anchor carrier; later edges may contain any --airlines carrier.",
         ],
@@ -192,6 +205,7 @@ def main() -> None:
     if not AIRPORT_RE.fullmatch(args.origin.upper()):
         _error("--from must be a three-character airport IATA code")
     result = discover(args)
+    print(f"WARNING: {NON_EXHAUSTIVE_WARNING}", file=sys.stderr)
     if args.format == "json":
         print(json.dumps(result, ensure_ascii=False))
     elif args.format == "codes":
