@@ -186,12 +186,43 @@ This is not by itself exhaustive: Google returns a ranked, finite result set. Fo
 
 For flexible date grids and `--explore`, calendar cells do not carry carrier names and `--include-airlines` is ignored. Use an unfiltered grid only to discover candidate destination/date pairs, then run an exact unfiltered search with `--include-airlines G3` for every candidate before presenting it as a GOL itinerary. Never present a grid-only price as verified GOL availability.
 
+## Destination inventory before searching all destinations
+
+For requests such as **"cheapest destinations served by airline X"** or **"anywhere from SSA on GOL"**, do not use Google's capped `--explore` destination list as the universe. Run the bundled stateless route-inventory producer first:
+
+```
+python3 scripts/airline-destinations.py \
+  --from SSA --airlines G3 --mode strict \
+  --max-hops 2 --international --format json
+```
+
+It fetches Jonty's public weekly route JSON and returns candidate destination airports with route paths and carrier provenance. It does not store a database and does not verify fares; the caller/LLM owns piping or fanning out the returned `destinations` into exact `flights-search.py` calls.
+
+Strict airline network:
+
+```
+python3 scripts/airline-destinations.py \
+  --from SSA --airlines G3 --mode strict \
+  --max-hops 2 --international --format jsonl
+```
+
+Anchor airline plus explicitly allowed partners (for example, GOL + Air France):
+
+```
+python3 scripts/airline-destinations.py \
+  --from SSA --airlines G3,AF --anchor G3 --mode anchor \
+  --max-hops 2 --international --format json
+```
+
+In anchor mode, the first route-graph edge must contain the anchor airline; later edges may contain any code in `--airlines`. Supply the partner codes appropriate to the user's stated partnership scope. Do not infer that every airline in the route dataset is a commercial partner. The route output is a candidate list; verify each destination/date with an unfiltered exact search plus `--include-airlines G3` and `--hide-separate`.
+
 ### Decision table — pick by intent
 
 | User says | Command | Result |
 |---|---|---|
 | "só Gol" (strict, accept gaps) | `--airlines G3` | only all-GOL itineraries; zero on partner-only routes |
-| **"Gol com parceria"** (Gol required, partner fills the rest) | `--airlines G3,AF --include-airlines G3` | JSON: only itineraries containing ≥1 Gol segment (e.g. `SSA>GIG` Gol + `GIG>CDG>MAD` AF) |
+| **"Gol com parceria"** (Gol required, partner fills the rest) | no `--airlines` + `--include-airlines G3` | JSON: only itineraries containing ≥1 Gol segment (e.g. `SSA>GIG` Gol + `GIG>CDG>MAD` AF) |
+| "Gol + a named partner ecosystem" | `--airlines G3,AF --include-airlines G3` | server-narrowed probe for the explicitly named ecosystem |
 | "Gol ou AF, não importa quem opera" | `--airlines G3,AF` | whole ecosystem incl. pure-AF trips — usually NOT what people mean |
 | Google's native city-level partnership view | `/m/...` entities + `--airlines G3` | most faithful; browser-gated → tool returns URL only |
 
@@ -205,7 +236,7 @@ For flexible date grids and `--explore`, calendar cells do not carry carrier nam
 
 ## Explore — any destination (no API key, from anywhere)
 
-**Agent rule for "cheapest across all destinations" questions:** ONE capped explore run IS the answer. Present the results plus the `explore_meta.request_budget` coverage note (e.g. "searched top 15 of 181 destinations") immediately — do NOT loop remaining destinations unless the user explicitly asks for full coverage. Explore runs are request- and time-budgeted so they always finish quickly.
+**Agent rule for "cheapest across all destinations" questions:** if no airline/company constraint is present, ONE capped explore run IS the answer. Present the results plus the `explore_meta.request_budget` coverage note (e.g. "searched top 15 of 181 destinations") immediately. If an airline/company constraint is present, run `scripts/airline-destinations.py` first and search the returned candidate list; do not treat capped `--explore` as exhaustive. Explore runs are request- and time-budgeted so they always finish quickly.
 
 Omit `--to` to explore anywhere from `--from` (any origin worldwide, any `--airlines`, direct + 1-stop via hub, derived from public dataset). Filter with `--explore-intl` (international only).
 
