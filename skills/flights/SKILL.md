@@ -184,7 +184,7 @@ This lets Google return GOL + Air France, GOL + KLM, GOL + other partners, and G
 
 This is not by itself exhaustive: Google returns a ranked, finite result set. For an exhaustive partner sweep, also run explicit searches for the relevant official partner ecosystems, deduplicate, and verify the ticketing/carrier combination.
 
-For flexible date grids and `--explore`, calendar cells do not carry carrier names and `--include-airlines` is ignored. Use an unfiltered grid only to discover candidate destination/date pairs, then run an exact unfiltered search with `--include-airlines G3` for every candidate before presenting it as a GOL itinerary. Never present a grid-only price as verified GOL availability.
+For flexible date grids and `--explore` without an airline/company constraint, calendar cells do not carry carrier names and `--include-airlines` is ignored. Use the grid only to discover candidate destination/date pairs, then run an exact unfiltered search with `--include-airlines G3` for every candidate before presenting it as a GOL itinerary. When an airline/company constraint is present, use the destination inventory below instead of `--explore` for the destination universe. Never present a grid-only price as verified GOL availability.
 
 ## Destination inventory before searching all destinations
 
@@ -197,6 +197,8 @@ python3 scripts/airline-destinations.py \
 ```
 
 It fetches Jonty's public weekly route JSON and returns candidate destination airports with route paths and carrier provenance. It does not store a database and does not verify fares; the caller/LLM owns piping or fanning out the returned `destinations` into exact `flights-search.py` calls.
+
+This supersedes `--explore` for airline-scoped “anywhere” requests: inventory chooses the candidate universe, and exact flight searches provide the live price/bookability check.
 
 Strict airline network:
 
@@ -234,20 +236,20 @@ In anchor mode, the first route-graph edge must contain the anchor airline; late
 3. `--include-airlines` accepts codes or names (`G3`, `GOL`, `Gol`) and applies ONLY to itinerary results. Grid/flex/explore cells carry no carrier names — the output adds a note saying so; verify carriers via the cell `url`.
 4. City entities (`/m/...`) are Google's own partnership mechanism but need a real browser session: the CLI rewrites the tfs with the hidden `Airport.type` field (origin city=3, dest city=2) and returns `{"ok":false,"reason":"browser-session-required","url":...}` — open via chrome-devtools/safari MCP and read result cards.
 
-## Explore — any destination (no API key, from anywhere)
+## Explore — unconstrained anywhere (no airline/company filter)
 
-**Agent rule for "cheapest across all destinations" questions:** if no airline/company constraint is present, ONE capped explore run IS the answer. Present the results plus the `explore_meta.request_budget` coverage note (e.g. "searched top 15 of 181 destinations") immediately. If an airline/company constraint is present, run `scripts/airline-destinations.py` first and search the returned candidate list; do not treat capped `--explore` as exhaustive. Explore runs are request- and time-budgeted so they always finish quickly.
+**Agent rule:** use `--explore` only when the user did not constrain the airline/company. ONE capped explore run is the initial answer. Present the results plus the `explore_meta.request_budget` coverage note (e.g. "searched top 15 of 181 destinations"). For an airline/company constraint, use `airline-destinations.py` instead; do not run `--explore` as a second destination-discovery mechanism. Explore runs are request- and time-budgeted so they always finish quickly.
 
 Omit `--to` to explore anywhere from `--from` (any origin worldwide, any `--airlines`, direct + 1-stop via hub, derived from public dataset). Filter with `--explore-intl` (international only).
 
 ```
-# anywhere from SSA on GOL — direct + 1-stop (AEP + MAD via CDG etc.)
-scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3,AF --explore-intl
+# anywhere from SSA — direct + 1-stop
+scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --explore-intl
 # same as omit --to (inferred explore):
-scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3,AF
+scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22
 
 # exhaustive 7-12d dest × date grid (anywhere)
-scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3,AF --explore-intl --flex-window 1 --min-stay 7 --max-stay 12 --currency BRL
+scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --explore-intl --flex-window 1 --min-stay 7 --max-stay 12 --currency BRL
 # → {"destinations":[...],"grid":[{"to":"AEP","price":2280},...],"cheapest":{...},"per_dest_cheapest":{...}}
 ```
 
@@ -255,7 +257,7 @@ Optional explore flags:
 - `--explore` — explicit alias for omit-`--to` (redundant)
 - `--explore-intl` — only international
 - `--explore-limit N` / `--explore-validate` — cap / prune stale
-- `--explore-max-requests N` — request budget (default 15). Explore fans out one Google RPC per destination; big fan-outs are auto-capped to fit the budget — direct routes first, then nearest destinations by distance (not alphabetical) — and the run always succeeds; `explore_meta.request_budget` reports coverage (e.g. searched 15 of 181). For full coverage narrow `--airlines`/`--explore-intl`, raise the budget, or batch tail coverage with `--explore-dests`
+- `--explore-max-requests N` — request budget (default 15). Explore fans out one Google RPC per destination; big fan-outs are auto-capped to fit the budget — direct routes first, then nearest destinations by distance (not alphabetical) — and the run always succeeds; `explore_meta.request_budget` reports coverage (e.g. searched 15 of 181). For wider unconstrained coverage, raise the budget or batch tail coverage with `--explore-dests`; this is still not an airline destination inventory.
 - `--explore-time-budget S` — wall-clock budget (default 120s): stops launching new destinations after S seconds and returns partial results with a `time_capped` coverage note
 - `--explore-dests A,B,C` — explicit destination list overriding the dataset-derived one; batch tail coverage in a single command (session, pacing and budgets still apply)
 - `--per-dest-top N` — add `per_dest_top` to output: top-N cheapest in-window periods per destination
@@ -271,7 +273,7 @@ Open-ended date questions ("after January", "sometime next summer") should SWEEP
 scripts/flights-search.py --from SSA --to BCN --date 2027-02-09 --return-date 2027-02-17 --flex-window 15 --flex-months 6 --min-stay 9 --max-stay 14
 
 # light sampling across 6 months (3 anchors' worth of requests — good first pass), stay flags included
-scripts/flights-search.py --from SSA --date 2027-02-10 --return-date 2027-02-19 --airlines G3,AF --explore-intl --flex-window 2 --flex-months 6 --min-stay 9 --max-stay 14
+scripts/flights-search.py --from SSA --date 2027-02-10 --return-date 2027-02-19 --explore-intl --flex-window 2 --flex-months 6 --min-stay 9 --max-stay 14
 ```
 
 `--flex-months N` (1..12) repeats the window at anchors every 28 days and dedupes cells. Request cost multiplies by N; the explore request/time budgets still auto-cap destinations. Pacing (1s between monthly anchors) keeps anonymous sessions off Google's captcha wall; if you still hit HTTP 429 `/sorry`, wait a few minutes and retry — the error is surfaced in the output hint.
