@@ -21,8 +21,7 @@ This repository is a fork of [AWeirdDev/flights](https://github.com/AWeirdDev/fl
 |---|---|---|
 | Search one-way / round-trip / multi-city | ✅ | |
 | All search filters — stops, airlines/alliances, times, duration, layovers, connections, cabin, passengers, bags, currency, max price | ✅ | |
-| Flexible dates — round-trip | ✅ | `--flex-window`, plus `--min-stay`/`--max-stay`/`--flex-grid` |
-| Flexible dates — one-way | ✅ | `--flex-window N` without `--return-date` |
+| Flexible dates — round-trip | ✅ | `--flex-starting-date`, `--flex-ending-date`, `--flex-days` |
 | Price insights ("typical prices", cheap/high verdicts) | ✅ | `--price-insights` |
 | Multiple airports per side | ✅ | `--from SSA,GRU --to MAD` |
 | Nearby-airports toggle | ✅ | `--nearby [--nearby-km R]` |
@@ -62,8 +61,9 @@ skills/flights/scripts/flights-search.py --from SFO --to NRT --date 2026-10-01 -
 # multi-city
 skills/flights/scripts/flights-search.py --legs '[{"from":"MYJ","to":"TPE","date":"2026-08-25"},{"from":"TPE","to":"MYJ","date":"2026-08-30"}]'
 
-# flexible round-trip: ±2d around both dates, stays of 7–12 nights
-skills/flights/scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2 --min-stay 7 --max-stay 12
+# flexible round-trip: departures throughout a range, exact 12-day stay
+skills/flights/scripts/flights-search.py --from GRU --to JFK \
+  --flex-starting-date 2026-09-01 --flex-ending-date 2026-10-31 --flex-days 12
 
 # explore anywhere international from SSA on GOL (+partners), direct or 1-stop
 skills/flights/scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --airlines G3 --explore-intl

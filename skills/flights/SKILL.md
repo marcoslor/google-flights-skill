@@ -46,15 +46,16 @@ No login, no `/verify` wall. If `primp` is blocked (rare), the error detail will
 ## Flags
 **Required (no defaults, exit with `hint` if missing):**
 - `--from CODE` — origin IATA (e.g. `GRU`, `SSA`, `JFK`) — required
-- `--date YYYY-MM-DD` — departure date — required (unless `--legs`)
 - `--to CODE` — destination IATA — required unless exploring (omit `--to` to explore anywhere from `--from`)
-- `--legs JSON` — alternative to `--from/--to/--date` for multi-city
+- fixed-date search: `--date YYYY-MM-DD` — departure date
+- flexible-date search: `--flex-starting-date YYYY-MM-DD --flex-ending-date YYYY-MM-DD --flex-days N` — departure range plus exact trip length
+- `--legs JSON` — alternative to `--from/--to/--date` for fixed-date multi-city
 
 **Optional (sensible defaults, agent may omit):**
-- `--return-date YYYY-MM-DD` — if set, implies `--trip round-trip`
+- `--return-date YYYY-MM-DD` — fixed-date return date; if set, implies `--trip round-trip`
 - `--trip one-way|round-trip|multi-city` — default `one-way` (auto-set)
 - `--seat economy|premium-economy|business|first` — default `economy`
-- `--airlines` / `--flex-*` / `--currency` etc. — default none/`BRL` auto
+- `--airlines` / `--currency` etc. — default none/`BRL` auto
 
 **Passengers:**
 - `--adults N` — default 1 (max total 9)
@@ -112,11 +113,30 @@ scripts/flights-search.py --from GRU --to MAD --date 2026-11-05 --return-date 20
 # → GRU + CGH + VCP departures in one search
 ```
 
-Not combinable with `--explore`, `--flex-window`, `--legs`, or `/m/` city entities (each emits a workable error).
+Not combinable with `--explore`, a flexible date range, `--legs`, or `/m/` city entities (each emits a workable error).
 
-## Flexible dates — Date Grid (2-axis table) & Price Graph (bar)
+## Flexible dates — explicit departure range
 
-Google Flights' UI has two flexible views, both replicable:
+Flexible round-trip searches use three explicit fields:
+
+- `--flex-starting-date` — earliest departure date to consider
+- `--flex-ending-date` — latest departure date to consider
+- `--flex-days` — exact number of days between departure and return
+
+The script searches the complete requested departure range using Google's native calendar RPC, filters to the exact stay length, sorts by price, and returns the cheapest date pairs. These are not anchor dates and are not shown as fixed itinerary dates in the output.
+
+Example: cheapest 12-day trips departing anytime in 2027:
+
+```
+scripts/flights-search.py --from SSA --to MAD \
+  --flex-starting-date 2027-01-01 \
+  --flex-ending-date 2027-12-31 \
+  --flex-days 12 --currency BRL
+```
+
+Output mode is `flex-date-range`, with `query.flex_starting_date`, `query.flex_ending_date`, and `query.flex_days`.
+
+The native price graph remains available for a fixed-date, near-term search:
 
 **1. Native price graph (bar, fixed stay)**
 `--price-graph` extracts the 61-day graph Google already returns at `payload[5][10][0]` for the *same stay length*. Parsed from the same fetch as the flights — zero extra cost, covers ~today±30d (near-term). Use to find cheapest departure for a fixed duration in the next 2 months.
@@ -126,39 +146,7 @@ scripts/flights-search.py --from GRU --to JFK --date 2026-08-25 --return-date 20
 # → {"price_graph":[{"date":"2026-07-24","price":331},...],"price_graph_cheapest":{...},"price_insights":{...}}
 ```
 
-**2. Native date grid (2-axis table) — the only flex engine**
-`--flex-window N` uses Google's internal `GetCalendarGrid` RPC. A normal 7×7 picker is one request per destination; wider windows are automatically split into rectangles of at most 200 cells. It returns the cheapest fare for every departure × return pair, each with a normal Google Flights URL. Stay filters are applied client-side on the returned matrix.
-
-*Fixed stay* (default; same trip length as base dates):
-```
-scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2
-# → {"mode":"flex-fixed-stay","grid":[{"departure":"2026-09-17","return":"2026-09-22","price":773},...],"cheapest":{...}}
-```
-
-*Variable stay range* (e.g. stay 7–12 nights flexible):
-```
-scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2 --min-stay 7 --max-stay 12
-# → {"mode":"flex-variable-stay","grid":[...]}
-```
-
-*Full 2-axis matrix* (`--flex-grid` disables the fixed-stay filter):
-```
-scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 1 --flex-grid
-# → {"mode":"native-calendar-grid","grid":[...9 cells...],"cheapest":{...}}
-```
-
-*One-way flexible dates* (omit `--return-date`; same RPC, single leg):
-```
-scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --flex-window 3
-# → {"mode":"flex-one-way","grid":[{"departure":"2026-09-17","price":437},...],"cheapest":{...}}
-```
-
-Flexible search works for one-way and round-trip. The native grid is an undocumented Google frontend RPC, not a stable public API — if it changes, the command returns a workable hint.
-
-**Which to use?**
-- Near-term (≤60d) fixed stay → `--price-graph` (parsed from the search fetch, instant).
-- Flexible one-way → `--flex-window N` (no `--return-date`).
-- Any flexible round-trip → `--flex-window N --return-date ...` (+ `--min-stay/--max-stay`, or `--flex-grid` for the full matrix).
+The calendar RPC is an undocumented Google frontend endpoint, not a stable public API. If it changes, the command returns a workable hint.
 
 ## Airline filtering & partnerships — READ BEFORE USING `--airlines`
 
@@ -252,8 +240,10 @@ scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 
 # same as omit --to (inferred explore):
 scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22
 
-# exhaustive 7-12d dest × date grid (anywhere)
-scripts/flights-search.py --from SSA --date 2027-06-15 --return-date 2027-06-22 --explore-intl --flex-window 1 --min-stay 7 --max-stay 12 --currency BRL
+# exact 12-day dest × date grid (anywhere in 2027)
+scripts/flights-search.py --from SSA --explore-intl \
+  --flex-starting-date 2027-01-01 --flex-ending-date 2027-12-31 \
+  --flex-days 12 --currency BRL
 # → {"destinations":[...],"grid":[{"to":"AEP","price":2280},...],"cheapest":{...},"per_dest_cheapest":{...}}
 ```
 
@@ -265,26 +255,24 @@ Optional explore flags:
 - `--explore-time-budget S` — wall-clock budget (default 120s): stops launching new destinations after S seconds and returns partial results with a `time_capped` coverage note
 - `--explore-dests A,B,C` — explicit destination list overriding the dataset-derived one; batch tail coverage in a single command (session, pacing and budgets still apply)
 - `--per-dest-top N` — add `per_dest_top` to output: top-N cheapest in-window periods per destination
-- `--flex-window` / `--min-stay` / `--max-stay` work with explore (stay range must overlap what the window can reach, or the command says so upfront)
+- flexible explore searches use `--flex-starting-date`, `--flex-ending-date`, and `--flex-days`; grid cells are filtered to that departure range and exact stay length
 
-## Long-horizon sweeps (--flex-months)
+## Long-horizon sweeps
 
 Open-ended date questions ("after January", "sometime next summer") should SWEEP months, not anchor on one week:
 
 ```
-# contiguous 6-month sweep of one route (window 15 covers each month densely; ~9 RPCs/month)
-# ALWAYS carry --min-stay/--max-stay when the user gave a duration — the tool filters cells, agents must not hand-filter
-scripts/flights-search.py --from SSA --to BCN --date 2027-02-09 --return-date 2027-02-17 --flex-window 15 --flex-months 6 --min-stay 9 --max-stay 14
-
-# light sampling across 6 months (3 anchors' worth of requests — good first pass), stay flags included
-scripts/flights-search.py --from SSA --date 2027-02-10 --return-date 2027-02-19 --explore-intl --flex-window 2 --flex-months 6 --min-stay 9 --max-stay 14
+# full 2027 range, exact 12-day stay; no arbitrary anchor date is exposed
+scripts/flights-search.py --from SSA --to BCN \
+  --flex-starting-date 2027-01-01 --flex-ending-date 2027-12-31 \
+  --flex-days 12
 ```
 
-`--flex-months N` (1..12) repeats the window at anchors every 28 days and dedupes cells. Request cost multiplies by N; the explore request/time budgets still auto-cap destinations. Pacing (1s between monthly anchors) keeps anonymous sessions off Google's captcha wall; if you still hit HTTP 429 `/sorry`, wait a few minutes and retry — the error is surfaced in the output hint.
+The script automatically chunks the requested range into native calendar requests, deduplicates cells, and filters exact departure/return pairs. Request cost grows with the range and destination count; pacing keeps anonymous sessions off Google's captcha wall. If Google returns HTTP 429 `/sorry`, wait a few minutes and retry — the error is surfaced in the output hint.
 
-**Agent rule:** for open-ended periods, default to `--flex-months` matching the asked horizon (e.g. "after January" → sweep Feb–Jul: `--flex-months 5..6`). Start with a small window + wide month span; drill down with `--flex-window 15` on the cheapest month only.
+**Agent rule:** for open-ended periods, translate the user's date boundary into `--flex-starting-date` and `--flex-ending-date`; never invent a fixed `--date`/`--return-date` pair as the flexible search. Always pass the requested duration as `--flex-days`.
 
-**Agent rule for "top-N per destination" questions:** pass `--per-dest-top 3 --min-stay X --max-stay Y` on the FIRST capped sweep AND on every `--explore-dests` batch (so you never stitch outputs by hand), then merge `per_dest_top` maps. For destinations the budget didn't cover, follow up with ONE batched command per ~15 destinations using `--explore-dests MAD,LIS,FCO,...` (same flags), not one invocation per destination.
+**Agent rule for "top-N per destination" questions:** pass `--per-dest-top 3 --flex-starting-date ... --flex-ending-date ... --flex-days X` on the FIRST capped sweep AND on every `--explore-dests` batch (so you never stitch outputs by hand), then merge `per_dest_top` maps. For destinations the budget didn't cover, follow up with ONE batched command per ~15 destinations using `--explore-dests MAD,LIS,FCO,...` (same flags), not one invocation per destination.
 
 ## Invoking from an agent (minimal context)
 Pass the skill + query + output intent:
@@ -303,10 +291,11 @@ For filtered nonstop under $800:
 ```
 scripts/flights-search.py --from SFO --to NRT --date 2026-10-01 --max-stops 0 --max-price 800 --currency USD --seat economy
 ```
-For flexible cheapest (GFlights grid):
+For flexible cheapest dates:
 ```
-scripts/flights-search.py --from GRU --to JFK --date 2026-09-15 --return-date 2026-09-20 --flex-window 2 --price-graph
-# or 2-axis: add --flex-grid ; variable stay: add --min-stay 3 --max-stay 7
+scripts/flights-search.py --from GRU --to JFK \
+  --flex-starting-date 2026-09-01 --flex-ending-date 2026-10-31 \
+  --flex-days 5
 ```
 
 ## Presenting results

@@ -7,6 +7,7 @@ One call, one JSON line. No browser, no login.
 Interface (only what an agent needs):
   flights-search.py --from GRU --to JFK --date 2026-09-01 [flags]
   flights-search.py --from GRU --to JFK --date 2026-09-01 --return-date 2026-09-10 [flags]
+  flights-search.py --from GRU --to JFK --flex-starting-date 2027-01-01 --flex-ending-date 2027-12-31 --flex-days 12 [flags]
   flights-search.py --legs '[{"from":"MYJ","to":"TPE","date":"2026-08-25"},...]' [flags]
   flights-search.py --help
 
@@ -341,17 +342,15 @@ def flex_month_anchors(date: str, return_date: str, months: int) -> list[tuple[s
     ]
 
 
-def _stay_overlap(min_stay: int | None, max_stay: int | None, base_stay: int, window: int) -> tuple[int, int] | None:
-    """Intersection of the requested stay range and stays reachable at --flex-window.
-
-    Returns (lo, hi), or None when no stay in the requested range can be
-    produced by the window (avoids fetching grids that filter to empty).
-    """
-    if min_stay is None or max_stay is None:
-        return (base_stay - window, base_stay + window)
-    lo = max(min_stay, base_stay - window)
-    hi = min(max_stay, base_stay + window)
-    return (lo, hi) if lo <= hi else None
+def _date_query_fields(args) -> dict[str, Any]:
+    """Expose the user-facing date mode without leaking internal anchors."""
+    if getattr(args, "flex_range", None):
+        return {
+            "flex_starting_date": args.flex_starting_date,
+            "flex_ending_date": args.flex_ending_date,
+            "flex_days": args.flex_days,
+        }
+    return {"date": args.date, "return_date": args.return_date}
 
 
 def _per_dest_top(grid: list[dict[str, Any]], n: int) -> dict[str, list[dict[str, Any]]]:
@@ -1224,6 +1223,9 @@ def main():
     p.add_argument("--date", help="departure date YYYY-MM-DD")
     p.add_argument("--return-date", help="return date YYYY-MM-DD (implies round-trip)")
     p.add_argument("--legs", help="multi-city as JSON array: '[{\"from\":\"MYJ\",\"to\":\"TPE\",\"date\":\"2026-08-25\"},...]'")
+    p.add_argument("--flex-starting-date", help="flexible search: earliest departure date YYYY-MM-DD")
+    p.add_argument("--flex-ending-date", help="flexible search: latest departure date YYYY-MM-DD")
+    p.add_argument("--flex-days", type=int, help="flexible search: exact trip length in days")
     p.add_argument("--trip", choices=["one-way", "round-trip", "multi-city"], default=None, help="trip type (auto-inferred if omitted)")
     p.add_argument("--seat", choices=["economy", "premium-economy", "business", "first"], default="economy")
     # passengers
@@ -1264,11 +1266,6 @@ def main():
     p.add_argument("--price-graph", action="store_true", help="include native 61-day price graph (fixed stay) at payload[5][10][0] — parsed from the same fetch, no extra request")
     p.add_argument("--price-insights", action="store_true", help="include Google's price insights panel (current/typical/usual band/verdict), free from payload[5]")
     p.add_argument("--keep-tokens", action="store_true", help="keep per-cell booking_token in grid output (for preselected browser flows)")
-    p.add_argument("--flex-window", type=int, default=None, help="flexible search: +/- N days around --date (and --return-date if set; without it = one-way flex). 2 => 5 dates per axis")
-    p.add_argument("--flex-months", type=int, default=1, help="repeat the flex window at monthly anchors (28d step): 6 with --flex-window 15 = contiguous 6-month sweep; small windows sample periodically across months")
-    p.add_argument("--flex-grid", action="store_true", help="with --flex-window, use Google's native 2-axis departure×return calendar (one RPC per <=200-cell chunk). Requires --return-date")
-    p.add_argument("--min-stay", type=int, default=None, help="variable stay: min days (requires --max-stay)")
-    p.add_argument("--max-stay", type=int, default=None, help="variable stay: max days (requires --min-stay)")
     p.add_argument("--flex-concurrency", type=int, default=3, help="concurrency for flexible requests/chunks (default 3, max 5)")
     p.add_argument("--flex-limit", type=int, default=None, help="limit grid results after sorting (default all)")
     # public dataset explore (out-of-box, no API key)
@@ -1288,10 +1285,49 @@ def main():
     args = p.parse_args()
 
     # ── early date validation (workable errors) ──
-    if not (1 <= args.flex_months <= 12):
-        emit_error("--flex-months must be 1..12", hint="workable: 6 = half-year sweep; each month adds the window's request cost")
-    if args.flex_months > 1 and args.flex_window is None:
-        emit_error("--flex-months requires --flex-window", hint="workable: add --flex-window 15 for dense monthly coverage, or a small window like 2 for periodic sampling")
+    args.flex_range = None
+    # These are implementation details of the native calendar engine. They
+    # are deliberately not CLI flags: flexible searches are expressed as an
+    # explicit departure range plus one exact stay length.
+    args.flex_window = None
+    args.flex_months = 1
+    flex_args = (args.flex_starting_date, args.flex_ending_date, args.flex_days)
+    if any(value is not None for value in flex_args):
+        if args.date or args.return_date:
+            emit_error(
+                "flexible searches cannot combine --date/--return-date with the flex range",
+                hint="workable: use --date [--return-date] for fixed dates, or use --flex-starting-date --flex-ending-date --flex-days for a date range",
+            )
+        if not all(value is not None for value in flex_args):
+            emit_error(
+                "flexible searches require --flex-starting-date, --flex-ending-date, and --flex-days",
+                hint="workable: e.g. --flex-starting-date 2027-01-01 --flex-ending-date 2027-12-31 --flex-days 12",
+            )
+        try:
+            flex_start = _parse_date(args.flex_starting_date)
+            flex_end = _parse_date(args.flex_ending_date)
+        except ValueError as e:
+            emit_error(str(e), hint="workable: flexible dates must be YYYY-MM-DD")
+        if flex_end < flex_start:
+            emit_error(
+                "--flex-ending-date must be on or after --flex-starting-date",
+                hint="workable: set the earliest and latest departure dates in chronological order",
+            )
+        if args.flex_days <= 0:
+            emit_error("--flex-days must be a positive integer", hint="workable: use --flex-days 12 for a 12-day trip")
+        args.flex_range = (flex_start, flex_end)
+        # The native calendar RPC needs a reference pair. These are internal
+        # anchors; output exposes the requested range instead.
+        args.date = flex_start.isoformat()
+        args.return_date = (flex_start + _dt.timedelta(days=args.flex_days)).isoformat()
+        args.flex_window = 15
+        span_days = (flex_end - flex_start).days + 1
+        args.flex_months = max(1, (span_days + 27) // 28)
+        if args.legs:
+            emit_error(
+                "flexible date ranges cannot be combined with --legs",
+                hint="workable: use --flex-starting-date --flex-ending-date --flex-days for one route, or --legs for explicit fixed-date segments",
+            )
     for label, val in [("--date", args.date), ("--return-date", args.return_date)]:
         if val:
             try:
@@ -1369,7 +1405,7 @@ def main():
             if cap < 1:
                 emit_error(
                     f"--explore-max-requests {max_requests} cannot fit even one destination ({per_dest} grid chunk(s) each)",
-                    hint=f"workable: raise --explore-max-requests to at least {per_dest}, or reduce --flex-window",
+                    hint=f"workable: raise --explore-max-requests to at least {per_dest}, or narrow the flexible departure range",
                 )
             requested_count = len(dests)
             dests = dests[:cap]
@@ -1384,25 +1420,10 @@ def main():
         # Flexible dates are served entirely by the native calendar grid;
         # stay filters are applied client-side on the returned matrix.
         mode = "explore"
-        if args.flex_window is not None:
+        if args.flex_range is not None:
             window = args.flex_window
-            if window < 0 or window > 15:
-                emit_error("--flex-window must be 0..15", hint="workable: use 1 for ±1d (3 dates), 2 for ±2d (5 dates), max 15")
-            if not args.return_date:
-                emit_error("flexible search needs --return-date", hint="workable: add --return-date for round-trip grids; for one-way near-term use --price-graph")
-            if (args.min_stay is None) != (args.max_stay is None):
-                emit_error("--min-stay and --max-stay must be given together", hint="workable: pass both, e.g. --min-stay 7 --max-stay 12")
-            if args.min_stay is not None:
-                base_stay = (_parse_date(args.return_date) - _parse_date(args.date)).days
-                overlap = _stay_overlap(args.min_stay, args.max_stay, base_stay, window)
-                if overlap is None:
-                    emit_error(
-                        f"--min-stay {args.min_stay}..{args.max_stay} has no overlap with stays {base_stay - window}..{base_stay + window} reachable at --flex-window {window}",
-                        hint="workable: increase --flex-window, widen the stay range, or move --date/--return-date",
-                    )
         else:
-            if args.min_stay is not None or args.max_stay is not None:
-                emit_error("--min-stay/--max-stay requires --flex-window", hint="workable: add --flex-window N (e.g. 1) to enable variable stay grid")
+            window = None
 
         conc = min(max(1, args.flex_concurrency), 5)
         passengers_dict = {"adults": args.adults, "children": args.children, "infants_in_seat": args.infants_seat, "infants_on_lap": args.infants_lap}
@@ -1493,6 +1514,14 @@ def main():
                 if not dest_errored:
                     searched_count += 1
             grid.extend(grid_by_key.values())
+            if args.flex_range:
+                flex_start, flex_end = args.flex_range
+                grid = [
+                    g for g in grid
+                    if g.get("return")
+                    and flex_start <= _parse_date(g["departure"]) <= flex_end
+                    and (_parse_date(g["return"]) - _parse_date(g["departure"])).days == args.flex_days
+                ]
             mode = "explore+native-calendar-grid"
         else:
             # single pair per dest: one grid cell each (window 0)
@@ -1569,7 +1598,7 @@ def main():
         out: dict[str, Any] = {
             "ok": True,
             "mode": mode,
-            "query": {"from": args.from_, "date": args.date, "return_date": args.return_date, "trip": trip, "seat": args.seat, "currency": args.currency, "airlines": args.airlines, "explore": True, "explore_scope": args.explore_scope, "explore_intl": args.explore_intl, "flex_window": args.flex_window, "flex_months": args.flex_months, "min_stay": args.min_stay, "max_stay": args.max_stay},
+            "query": {"from": args.from_, **_date_query_fields(args), "trip": trip, "seat": args.seat, "currency": args.currency, "airlines": args.airlines, "explore": True, "explore_scope": args.explore_scope, "explore_intl": args.explore_intl},
             "explore_meta": explore_meta,
             "destinations": dests,
             "count": count_ok,
@@ -1582,7 +1611,7 @@ def main():
         if args.per_dest_top and args.per_dest_top > 0:
             out["per_dest_top"] = _per_dest_top(grid_sorted, args.per_dest_top)
         if count_ok == 0:
-            out["hint"] = "workable: no flights match - try different dates/weekday, remove --airlines, broaden --flex-window, try --explore-scope network, or check grid[].error/hint per entry"
+            out["hint"] = "workable: no flights match - broaden the flexible departure range, remove --airlines, try --explore-scope network, or check grid[].error/hint per entry"
         print(json.dumps(out, ensure_ascii=False))
         return
 
@@ -1591,8 +1620,8 @@ def main():
     to_codes_all = _split_codes(args.to)
     wants_multi = len(from_codes_all) > 1 or len(to_codes_all) > 1
     if wants_multi or args.nearby:
-        if args.explore or args.flex_window is not None:
-            emit_error("multi-airport (--from a,b) and --nearby can't combine with --explore or --flex-window", hint="workable: run one flexible/explore pass per airport pair instead")
+        if args.explore or args.flex_range is not None:
+            emit_error("multi-airport (--from a,b) and --nearby can't combine with --explore or a flexible date range", hint="workable: run one flexible/explore pass per airport pair instead")
         if args.legs:
             emit_error("comma-separated codes need plain --from/--to, not --legs", hint="workable: e.g. --from SSA,GRU --to MAD --date 2026-11-05")
         if not from_codes_all or not to_codes_all:
@@ -1647,7 +1676,7 @@ def main():
         _city_browser_required(query, args.from_, args.to)
 
     if args.url_only:
-        print(json.dumps({"ok": True, "url": url, "query": {"from": args.from_, "to": args.to, "date": args.date, "return_date": args.return_date, "trip": trip, "seat": args.seat}}, ensure_ascii=False))
+        print(json.dumps({"ok": True, "url": url, "query": {"from": args.from_, "to": args.to, **_date_query_fields(args), "trip": trip, "seat": args.seat}}, ensure_ascii=False))
         return
 
     # ── Multi-airport / nearby: rewrite tfs with repeated airports ──
@@ -1676,24 +1705,10 @@ def main():
 
     # ── Flexible search: native Date Grid, stay filters applied client-side ──
     if args.flex_window is not None:
-        if not args.from_ or not args.to or not args.date:
-            emit_error("--flex-window requires --from, --to, --date", hint="workable: add --from GRU --to JFK --date 2026-09-15 [--return-date 2026-09-20] or use --explore for auto dests")
+        if not args.from_ or not args.to or not args.flex_range:
+            emit_error("flexible searches require --from, --to, --flex-starting-date, --flex-ending-date, and --flex-days", hint="workable: e.g. --from SSA --to MAD --flex-starting-date 2027-01-01 --flex-ending-date 2027-12-31 --flex-days 12")
         window = args.flex_window
-        if window < 0 or window > 15:
-            emit_error("--flex-window must be 0..15", hint="workable: use 1 (±1d) 2 (±2d) up to 15, higher = more requests")
-        one_way_flex = args.return_date is None
-        if one_way_flex and (args.min_stay is not None or args.max_stay is not None):
-            emit_error("one-way flexible search has no stay length", hint="workable: drop --min-stay/--max-stay, or add --return-date for round-trip grids")
-        if (args.min_stay is None) != (args.max_stay is None):
-            emit_error("--min-stay and --max-stay must be given together", hint="workable: pass both, e.g. --min-stay 7 --max-stay 12")
-        if args.min_stay is not None:
-            base_stay = (_parse_date(args.return_date) - _parse_date(args.date)).days
-            overlap = _stay_overlap(args.min_stay, args.max_stay, base_stay, window)
-            if overlap is None:
-                emit_error(
-                    f"--min-stay {args.min_stay}..{args.max_stay} has no overlap with stays {base_stay - window}..{base_stay + window} reachable at --flex-window {window}",
-                    hint="workable: increase --flex-window, widen the stay range, or move --date/--return-date",
-                )
+        one_way_flex = False
 
         conc = min(max(1, args.flex_concurrency), 5)
         passengers_dict = {"adults": args.adults, "children": args.children, "infants_in_seat": args.infants_seat, "infants_on_lap": args.infants_lap}
@@ -1756,28 +1771,19 @@ def main():
                     },
                 )
         grid = list(grid_by_key.values())
+        if args.flex_range:
+            flex_start, flex_end = args.flex_range
+            grid = [
+                g for g in grid
+                if g.get("return")
+                and flex_start <= _parse_date(g["departure"]) <= flex_end
+                and (_parse_date(g["return"]) - _parse_date(g["departure"])).days == args.flex_days
+            ]
         if args.flex_months > 1:
             grid.sort(key=lambda x: (x.get("departure") or "", x.get("return") or ""))
         total_pairs = len(grid)
 
-        # Stay filters on the returned matrix. Default (no --flex-grid, no
-        # min/max stay): fixed-stay diagonal — same trip length as base dates.
-        def _stay(cell: dict[str, Any]) -> int | None:
-            if cell.get("price") is None or cell.get("return") is None:
-                return None
-            return (_parse_date(cell["return"]) - _parse_date(cell["departure"])).days
-
-        if one_way_flex:
-            mode = "flex-one-way"
-        elif args.min_stay is not None and args.max_stay is not None:
-            mode = "flex-variable-stay"
-            grid = [g for g in grid if (s := _stay(g)) is not None and args.min_stay <= s <= args.max_stay]
-        elif not args.flex_grid:
-            mode = "flex-fixed-stay"
-            base_stay = (_parse_date(args.return_date) - _parse_date(args.date)).days
-            grid = [g for g in grid if (s := _stay(g)) == base_stay]
-        else:
-            mode = "native-calendar-grid"
+        mode = "flex-date-range"
 
         # sort by price (None last)
         grid_sorted = sorted(grid, key=lambda x: (x["price"] is None, x["price"] if x["price"] is not None else 10**9))
@@ -1809,7 +1815,7 @@ def main():
         out = {
             "ok": True,
             "mode": mode,
-            "query": {"from": args.from_, "to": args.to, "date": args.date, "return_date": args.return_date, "trip": trip, "seat": args.seat, "currency": args.currency, "flex_window": window, "flex_months": args.flex_months, "flex_grid": args.flex_grid, "min_stay": args.min_stay, "max_stay": args.max_stay},
+            "query": {"from": args.from_, "to": args.to, **_date_query_fields(args), "trip": trip, "seat": args.seat, "currency": args.currency},
             "count": count_ok,
             "total_pairs": total_pairs,
             "grid": grid_sorted,
@@ -1817,7 +1823,7 @@ def main():
             "url": url,
         }
         if count_ok == 0:
-            out["hint"] = "workable: no flights in grid - try different dates/weekday, remove --airlines/--max-stops, increase --flex-window, or add --price-graph for near-term"
+            out["hint"] = "workable: no flights in the requested range - broaden the flexible departure range, remove --airlines/--max-stops, or retry later"
             if first_error:
                 out["hint"] += f" | last fetch error: {first_error[0][:120]} — {first_error[1]}"
         if args.include_airlines:
