@@ -88,7 +88,7 @@ def main():
     p.add_argument("--keep-tokens", action="store_true", help="keep per-cell booking_token in grid output (for preselected browser flows)")
     p.add_argument("--flex-concurrency", type=int, default=3, help="concurrency for flexible requests/chunks (default 3, max 5)")
     p.add_argument("--flex-limit", type=int, default=None, help="limit grid results after sorting (default all)")
-    p.add_argument("--flex-chunk-days", type=int, default=30, help="flexible engine sweeps the departure range in chunks of this many days (default 30; failed chunks auto-split down to 7-day leaves)")
+    p.add_argument("--flex-chunk-days", type=int, default=None, help="override automatic chunk planning (auto = largest safe requests: ~185-day sweeps inside the fare horizon, cheap probes beyond)")
     p.add_argument("--min-stay", type=int, default=None, help="flexible search: minimum trip length in days (variable-stay band; replaces --flex-days)")
     p.add_argument("--max-stay", type=int, default=None, help="flexible search: maximum trip length in days (variable-stay band; replaces --flex-days)")
     p.add_argument("--flex-window", type=int, default=None, help="COMPAT: +/- days around --date; translated to a flex-starting/ending-date range")

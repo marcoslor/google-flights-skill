@@ -1,6 +1,6 @@
 ---
 name: flights
-description: Fast Google Flights search via the protobuf API (fast-flights + reverse-engineered RPCs) — no browser, no anti-bot wall. Use when the user wants to find flights, compare prices, check routes or flexible dates, explore destinations from an origin, search multiple airports at once, or find partner-airline itineraries ("find flight GRU to JFK", "cheapest MYJ to TPE", "round-trip SFO to NRT", "flexible dates GRU JFK", "anywhere from SSA on Gol"). Airline restrictions default to anchor-carrier-plus-partners; missing details (origin → SSA, currency → BRL) are assumed and stated — proceed without blocking questions.
+description: Fast Google Flights search via the protobuf API (fast-flights + reverse-engineered RPCs) — no browser, no anti-bot wall. Use when the user wants to find flights, compare prices, check routes or flexible dates, explore destinations from an origin, search multiple airports at once, or find partner-airline itineraries ("find flight GRU to JFK", "cheapest MYJ to TPE", "round-trip SFO to NRT", "flexible dates GRU JFK", "anywhere from SSA on Gol"). Ask only for a missing origin; everything else defaults (airline restrictions → anchor-carrier-plus-partners, currency → BRL) and proceeds without blocking questions.
 license: MIT
 metadata:
   author: marcoslor
@@ -12,7 +12,7 @@ metadata:
 
 ## Default workflow (follow for ANY flights request — no user prompting needed)
 
-1. Load context: origin/destination codes, dates or date-range, stay length, airline intent — apply the Defaults for anything missing and proceed; never block on questions.
+1. Resolve context: **origin (ask if missing — the one blocking question)**, destination(s), dates or date-range, stay length. Everything else defaults — proceed without further questions.
 2. **Airline-constrained "anywhere/region" asks** (e.g. "Europe via Gol"): build the universe with `scripts/airline-destinations.py` first (anchor mode), never `--explore`.
 3. **Cheapest-date or open-ended date asks** ("cheapest week/month", "flexible", "sometime in 2027", a month range): sweep with `--flex-starting-date/--flex-ending-date` + `--flex-days` or `--min-stay/--max-stay`. Never anchor a fixed `--date`. Batch multiple destinations into ONE `--explore-dests` sweep with `--per-dest-top N`.
 4. **Verify** grid/explore candidates with exact fixed-date searches (`--include-airlines G3 --hide-separate`) before presenting them as bookable.
@@ -43,12 +43,15 @@ Meanings for reference:
 
 Never silently use bare `--airlines G3` for a "via/with Gol" ask — that hides every mixed-itinerary fare.
 
-## Defaults — never block on these
+## Defaults — what to ask vs what to assume
 
-Proceed with these whenever the user omits them, stating them once in the final answer:
-- **Origin unspecified → SSA (Salvador).**
-- Currency → BRL · cabin → economy · 1 adult.
-- "Cheapest weeks/months/dates" → sweep a range, bucket grid cells by departure week (Mon–Sun), week price = min cell, rank ascending, verify winners with exact searches before presenting.
+**Ask (blocking, single short question) when missing:**
+- **Origin** — required; never guess it.
+
+**Assume and proceed (state once in the final answer):**
+- Currency → BRL · cabin → economy · 1 adult
+- Airline intent → anchor carrier plus partners (see below)
+- "Cheapest weeks/months/dates" → sweep a range, bucket grid cells by departure week (Mon–Sun), week price = min cell, rank ascending, verify winners with exact searches before presenting
 
 ## The single entry point
 ```
@@ -172,7 +175,9 @@ Output mode is `flex-date-range`. Key fields: `grid` (cells with `departure`, `r
 
 Google's fare calendar publishes roughly **today → today+10½ months** (rolling). Departures beyond that come back as unpriced cells (`coverage.gaps` + trailing note); exact fixed-date searches return 0 there too until airlines load schedules. This is not a bug — do not retry or debug it. When a user asks for dates past the wall, answer with what IS priced and state plainly that later months are not yet bookable/published.
 
-Typical runtimes (set tool timeouts accordingly): short sweep ≤1 month ≈ 5–20 s; one quarter ≈ 20–60 s; full year ≈ 1–3 min per route (use timeout ≥ 300000 ms).
+Typical runtimes (set tool timeouts accordingly): ≤1 month ≈ 1-2 s · 6 months ≈ 6 s · full year ≈ 25 s per route. The engine auto-plans the fewest safe requests (~185-day sweeps inside the fare horizon, a cheap probe at its edge); `--flex-chunk-days` only needs setting if you want different slicing. Under throttling, requests back off automatically (15 s → …→ ~30 min) instead of failing — sweeps stay correct, just slower; don't kill them.
+
+Request floor: calendars are per-route — Google merges multi-destination calendar queries into cheapest-per-date with no attribution, so N destinations × any range inside the horizon costs 2N requests minimum (one outbound + one inbound one-way sweep each).
 
 The native price graph remains available for a fixed-date, near-term search:
 

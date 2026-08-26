@@ -218,3 +218,18 @@ def _classify_fetch_error(e: Exception) -> tuple[str, str]:
     if "primp" in msg.lower() or "403" in msg or "429" in msg or "timeout" in msg.lower():
         return (msg, "workable: transient fetch blocked - retry once, reduce --flex-concurrency, or set --proxy")
     return (msg, "workable: check --from/--to codes, dates are future YYYY-MM-DD, and try without restrictive filters")
+
+
+_TRANSIENT_MARKERS = (
+    "429", "403", "/sorry", "captcha", "consent",
+    "body collection", "decoding response body", "error decoding",
+    "timeout", "timed out", "connection reset", "connection aborted",
+    "temporarily unavailable", "503", "502",
+)
+
+
+def fetch_error_is_transient(detail: str) -> bool:
+    """True when the error looks like throttling/a soft block rather than
+    genuine no-data — callers should back off and retry, not split."""
+    low = (detail or "").lower()
+    return any(m in low for m in _TRANSIENT_MARKERS)

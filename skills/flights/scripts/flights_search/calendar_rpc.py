@@ -2,6 +2,7 @@ import argparse
 import datetime as _dt
 import json
 import sys
+import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -304,6 +305,25 @@ def _open_calendar_session(query, proxy: str | None, currency: str, client: Any 
 _CALENDAR_CALL_TIMEOUT = 15
 
 
+# Process-wide pacing: anonymous GetCalendarGrid bursts trip Google's
+# throttle, so every chunk submit passes through this gate regardless of
+# which engine or thread issues it.
+_PACE_LOCK = threading.Lock()
+_PACE_LAST = 0.0
+_PACE_INTERVAL = 1.0
+
+
+def _pace_google_rpc() -> None:
+    global _PACE_LAST
+    with _PACE_LOCK:
+        now = time.monotonic()
+        wait = _PACE_LAST + _PACE_INTERVAL - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _PACE_LAST = now
+
+
 def _calendar_grid_chunk(
     session: dict[str, Any],
     from_arg: str,
@@ -320,6 +340,7 @@ def _calendar_grid_chunk(
     filters: dict[str, Any],
     max_price: int | None,
 ) -> list[dict[str, Any]]:
+    _pace_google_rpc()
     body = _calendar_request_body(
         from_arg,
         to_arg,
