@@ -10,6 +10,14 @@ metadata:
 
 # Flights (Google Flights via fast-flights)
 
+## Default workflow (follow for ANY flights request — no user prompting needed)
+
+1. Load context: origin/destination codes, dates or date-range, stay length, airline intent (ask only if the Airline intent rule below requires it).
+2. **Airline-constrained "anywhere/region" asks** (e.g. "Europe via Gol"): build the universe with `scripts/airline-destinations.py` first (anchor mode), never `--explore`.
+3. **Cheapest-date or open-ended date asks** ("cheapest week/month", "flexible", "sometime in 2027", a month range): sweep with `--flex-starting-date/--flex-ending-date` + `--flex-days` or `--min-stay/--max-stay`. Never anchor a fixed `--date`. Batch multiple destinations into ONE `--explore-dests` sweep with `--per-dest-top N`.
+4. **Verify** grid/explore candidates with exact fixed-date searches (`--include-airlines G3 --hide-separate`) before presenting them as bookable.
+5. Run every sweep with a generous bash timeout (≥300000 ms; typical runtimes in "Fare-publication horizon" below). Report `coverage.gaps` honestly; present compact rows + url.
+
 ## What the agent does
 Search Google Flights with **minimum tokens** using the `fast-flights` Python library (AWeirdDev/flights, 1.9k stars). It encodes queries as Base64 protobuf (`?tfs=`), fetches via `primp` (Chrome 145 impersonation), and parses the embedded JS data — no Playwright, no browser needed.
 
@@ -89,6 +97,9 @@ No login, no `/verify` wall. If `primp` is blocked (rare), the error detail will
 - `--top N` — return only first N after sorting
 - `--min-price N` / `--max-price-client N` — client-side price filter (different from server --max-price)
 - `--proxy URL` — e.g. `http://user:pass@host:port` (passed to primp)
+- `--cookie "COOKIE_STRING"` — raw Cookie header (e.g. after solving a `/sorry` captcha once in a browser: `GOOGLE_ABUSE_EXEMPTION=...; NID=...`); applied to every request and clears the wall
+- `--flex-concurrency N` — parallel chunk fetches (default 3, max 5); lower it if throttled
+- `--flex-limit N` — trim grid output to cheapest N cells
 - `--url-only` — only print the Google Flights URL, don't fetch
 
 **Price context & multi-airport:**
@@ -265,7 +276,7 @@ scripts/flights-search.py --from SSA --explore-intl \
 Optional explore flags:
 - `--explore` — explicit alias for omit-`--to` (redundant)
 - `--explore-intl` — only international
-- `--explore-limit N` / `--explore-validate` — cap / prune stale
+- `--explore-limit N` — cap number of destinations
 - `--explore-max-requests N` — request budget (default 15). Explore fans out one Google RPC per destination; big fan-outs are auto-capped to fit the budget — direct routes first, then nearest destinations by distance (not alphabetical) — and the run always succeeds; `explore_meta.request_budget` reports coverage (e.g. searched 15 of 181). For wider unconstrained coverage, raise the budget or batch tail coverage with `--explore-dests`; this is still not an airline destination inventory.
 - `--explore-time-budget S` — wall-clock budget (default 120s): stops launching new destinations after S seconds and returns partial results with a `time_capped` coverage note
 - `--explore-dests A,B,C` — explicit destination list overriding the dataset-derived one; batch tail coverage in a single command (session, pacing and budgets still apply)

@@ -62,10 +62,24 @@ def run_explore(args, *, trip: str) -> None:
     # grid chunk). Never error out on big fan-outs — auto-cap the list to
     # fit the budget (direct routes first) and report coverage in-band so
     # zero-context agents always get results plus honest scope notes.
+    # Exception: an explicit --explore-dests list IS the user's requested
+    # scope, so when the budget is still at the default, auto-fit it to
+    # cover every listed destination instead of silently capping to one.
+    per_dest = _grid_chunks_for_window(args.flex_window) if args.flex_window is not None else 1
     est_requests = _explore_request_estimate(len(dests), args.flex_window, args.flex_months)
     max_requests = max(1, args.explore_max_requests)
+    if args.explore_dests and args.explore_max_requests == 15 and est_requests > 15:
+        needed = min(est_requests, len(dests) * per_dest + len(dests))
+        args.explore_max_requests = max_requests = needed
+        explore_meta["request_budget"] = {
+            "auto_fitted": True,
+            "requested_destinations": len(dests),
+            "estimated_requests": needed,
+            "note": "explicit --explore-dests list: request budget auto-fitted to cover every destination",
+        }
+    if args.explore_dests and args.explore_time_budget == 120:
+        args.explore_time_budget = min(900, max(240, 100 * len(dests)))
     if est_requests > max_requests:
-        per_dest = _grid_chunks_for_window(args.flex_window) if args.flex_window is not None else 1
         cap = max_requests // per_dest
         if cap < 1:
             emit_error(
@@ -137,36 +151,35 @@ def run_explore(args, *, trip: str) -> None:
                         "note": "stopped early at the time budget; results above are complete for the destinations searched",
                     }
                     break
-                try:
-                    entries, _ = native_grid_for_route(
-                        args.from_,
-                        destination["iata"],
-                        anchor_dep,
-                        anchor_ret,
-                        window,
-                        args.currency,
-                        args.language,
-                        args.seat,
-                        passengers_dict,
-                        baggage_args,
-                        filters,
-                        args.max_price,
-                        args.proxy,
-                        conc,
-                        session=shared_session,
-                        keep_tokens=args.keep_tokens,
-                    )
-                    for entry in entries:
-                        key = (entry["departure"], entry["return"], entry["to"])
-                        if key not in grid_by_key:
-                            grid_by_key[key] = entry
-                            total_pairs += 1
-                except Exception as e:
-                    detail, hint = _classify_fetch_error(e)
-                    dest_errored = True
-                    grid_by_key.setdefault(
-                        (anchor_dep, anchor_ret, destination["iata"]),
-                        {
+                entries: list[dict[str, Any]] | None = None
+                for attempt in range(2):  # one retry: transient body/decode errors are common under bursts
+                    try:
+                        got, _ = native_grid_for_route(
+                            args.from_,
+                            destination["iata"],
+                            anchor_dep,
+                            anchor_ret,
+                            window,
+                            args.currency,
+                            args.language,
+                            args.seat,
+                            passengers_dict,
+                            baggage_args,
+                            filters,
+                            args.max_price,
+                            args.proxy,
+                            conc,
+                            session=shared_session,
+                            keep_tokens=args.keep_tokens,
+                        )
+                        entries = got
+                        break
+                    except Exception as e:
+                        detail, hint = _classify_fetch_error(e)
+                        if attempt == 0:
+                            time.sleep(1.5)
+                            continue
+                        grid.append({
                             "departure": anchor_dep,
                             "return": anchor_ret,
                             "price": None,
@@ -174,8 +187,14 @@ def run_explore(args, *, trip: str) -> None:
                             "error": detail,
                             "hint": hint,
                             "to": destination["iata"],
-                        },
-                    )
+                        })
+                        dest_errored = True
+                if entries:
+                    for entry in entries:
+                        key = (entry["departure"], entry["return"], entry["to"])
+                        if key not in grid_by_key:
+                            grid_by_key[key] = entry
+                            total_pairs += 1
             if not dest_errored:
                 searched_count += 1
         grid.extend(grid_by_key.values())
