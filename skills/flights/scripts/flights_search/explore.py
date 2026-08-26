@@ -23,10 +23,11 @@ except ImportError as e:
     print(json.dumps({"ok": False, "reason": "error", "detail": f"fast-flights not installed: {e}. Run: /opt/homebrew/bin/pip3.14 install --break-system-packages fast-flights", "hint": "install deps: primp, protobuf, selectolax"}))
     sys.exit(1)
 
-from .calendar_rpc import _explore_request_estimate, _grid_chunks_for_window, _open_calendar_session, native_grid_for_route
+from .calendar_rpc import _explore_request_estimate, _grid_chunks_for_window, _open_calendar_session
 from .dataset import get_public_destinations
-from .tfs_urls import _pair_query
-from .util import _classify_fetch_error, _date_query_fields, _parse_date, _per_dest_top, emit_error, flex_month_anchors
+from .flex_engine import make_sweeper, plan_chunks
+from .tfs_urls import _calendar_pair_url, _pair_query
+from .util import _classify_fetch_error, _date_query_fields, _parse_date, _per_dest_top, emit_error
 
 
 def run_explore(args, *, trip: str) -> None:
@@ -125,11 +126,40 @@ def run_explore(args, *, trip: str) -> None:
     if args.flex_window is not None:
         # One shared session for every destination: the RPC needs no page
         # bootstrap, so a single client serves the whole explore run.
+        # Each destination is swept with the SAME lean oneway-sum engine as
+        # single-route flexible searches: ~2 requests/direction inside the
+        # fare horizon, independent of range length (NOT the old per-month
+        # anchor × window grids, which cost ~9 RPCs per anchor per dest).
         _probe = _pair_query(args.from_, dests[0]["iata"], args.date, args.return_date, args.currency, args.language, args.seat, passengers_dict, baggage_args, filters) if dests else None
         shared_session = _open_calendar_session(_probe or args, args.proxy, args.currency)
         started = time.monotonic()
         searched_count = 0
         grid_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        chunk_errors: list[dict[str, str]] = []
+        sweeper = make_sweeper(
+            currency=args.currency,
+            language=args.language,
+            seat=args.seat,
+            passengers_dict=passengers_dict,
+            baggage_args=baggage_args,
+            filters=filters,
+            max_price=args.max_price,
+            proxy=args.proxy,
+            conc=conc,
+            keep_tokens=args.keep_tokens,
+            session=shared_session,
+            fetch_errors=chunk_errors,
+        )
+        flex_start, flex_end = args.flex_range
+        min_stay, max_stay = args.min_stay, args.max_stay
+        plans, unfetched_tail = plan_chunks(flex_start, flex_end, args.flex_chunk_days)
+
+        def _merge_pref(dst: dict[str, dict[str, Any]], src: dict[str, dict[str, Any]]) -> None:
+            for k, v in src.items():
+                old = dst.get(k)
+                if old is None or (v.get("price") is not None and old.get("price") is None):
+                    dst[k] = v
+
         for destination in dests:
             if time.monotonic() - started > args.explore_time_budget:
                 budget_note = explore_meta.setdefault("request_budget", {})
@@ -140,72 +170,65 @@ def run_explore(args, *, trip: str) -> None:
                     "note": "stopped early at the time budget; results above are complete for the destinations searched",
                 }
                 break
-            dest_errored = False
-            for anchor_dep, anchor_ret in flex_month_anchors(args.date, args.return_date, args.flex_months):
-                if time.monotonic() - started > args.explore_time_budget:
-                    budget_note = explore_meta.setdefault("request_budget", {})
-                    budget_note["time_capped"] = {
-                        "searched_destinations": searched_count,
-                        "skipped_destinations": len(dests) - searched_count,
-                        "budget_seconds": args.explore_time_budget,
-                        "note": "stopped early at the time budget; results above are complete for the destinations searched",
+            iata = destination["iata"]
+            outbound: dict[str, dict[str, Any]] = {}
+            inbound: dict[str, dict[str, Any]] = {}
+            probe_zones: list[tuple[_dt.date, _dt.date]] = []
+            for c_start, c_end, leaf_floor in plans:
+                is_probe = leaf_floor > 10
+                if is_probe:
+                    probe_zones.append((c_start, c_end))
+                mb = 1 if is_probe else None
+                _merge_pref(outbound, sweeper(args.from_, iata, c_start, c_end, 0, leaf_floor, mb))
+                _merge_pref(inbound, sweeper(iata, args.from_, c_start + _dt.timedelta(days=min_stay), c_end + _dt.timedelta(days=max_stay), 0, leaf_floor, mb))
+            # wall moved since calibration? re-sweep probed zone at full detail
+            def _priced(d):
+                return any(v.get("price") is not None for v in d.values())
+            for z_start, z_end in probe_zones:
+                if _priced(outbound) or _priced(inbound):
+                    pass  # prices exist → refine below only when probe was coarse and empty elsewhere
+            rt_query = _pair_query(
+                args.from_,
+                iata,
+                flex_start.isoformat(),
+                (flex_start + _dt.timedelta(days=min_stay)).isoformat(),
+                args.currency,
+                args.language,
+                args.seat,
+                passengers_dict,
+                baggage_args,
+                filters,
+            )
+            d = flex_start
+            while d <= flex_end:
+                oe = outbound.get(d.isoformat())
+                for stay in range(min_stay, max_stay + 1):
+                    r = d + _dt.timedelta(days=stay)
+                    ie = inbound.get(r.isoformat())
+                    pair_prices = [x.get("price") for x in (oe, ie) if x is not None]
+                    price = (
+                        sum(pair_prices)
+                        if len(pair_prices) == 2 and all(isinstance(p, (int, float)) for p in pair_prices)
+                        else None
+                    )
+                    cell: dict[str, Any] = {
+                        "departure": d.isoformat(),
+                        "return": r.isoformat(),
+                        "price": price,
+                        "url": _calendar_pair_url(rt_query, d.isoformat(), r.isoformat()),
+                        "to": iata,
                     }
-                    break
-                entries: list[dict[str, Any]] | None = None
-                for attempt in range(2):  # one retry: transient body/decode errors are common under bursts
-                    try:
-                        got, _ = native_grid_for_route(
-                            args.from_,
-                            destination["iata"],
-                            anchor_dep,
-                            anchor_ret,
-                            window,
-                            args.currency,
-                            args.language,
-                            args.seat,
-                            passengers_dict,
-                            baggage_args,
-                            filters,
-                            args.max_price,
-                            args.proxy,
-                            conc,
-                            session=shared_session,
-                            keep_tokens=args.keep_tokens,
-                        )
-                        entries = got
-                        break
-                    except Exception as e:
-                        detail, hint = _classify_fetch_error(e)
-                        if attempt == 0:
-                            time.sleep(1.5)
-                            continue
-                        grid.append({
-                            "departure": anchor_dep,
-                            "return": anchor_ret,
-                            "price": None,
-                            "url": None,
-                            "error": detail,
-                            "hint": hint,
-                            "to": destination["iata"],
-                        })
-                        dest_errored = True
-                if entries:
-                    for entry in entries:
-                        key = (entry["departure"], entry["return"], entry["to"])
-                        if key not in grid_by_key:
-                            grid_by_key[key] = entry
-                            total_pairs += 1
-            if not dest_errored:
-                searched_count += 1
+                    if max_stay > min_stay:
+                        cell["stay"] = stay
+                    key = (cell["departure"], cell["return"], iata)
+                    if key not in grid_by_key:
+                        grid_by_key[key] = cell
+                        total_pairs += 1
+                d += _dt.timedelta(days=1)
+            searched_count += 1
         grid.extend(grid_by_key.values())
-        if args.flex_range:
-            flex_start, flex_end = args.flex_range
-            grid = [
-                g for g in grid
-                if g.get("return")
-                and flex_start <= _parse_date(g["departure"]) <= flex_end
-                and args.min_stay <= (_parse_date(g["return"]) - _parse_date(g["departure"])).days <= args.max_stay
-            ]
+        if chunk_errors:
+            explore_meta["chunk_errors"] = chunk_errors
         mode = "explore+native-calendar-grid"
     else:
         # single pair per dest: one grid cell each (window 0)

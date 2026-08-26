@@ -27,6 +27,118 @@ from .calendar_rpc import native_grid_for_route
 from .tfs_urls import _calendar_pair_url, _pair_query
 from .util import _classify_fetch_error, _date_query_fields, _parse_date, _payload_from_html, emit_error, extract_price_graph_from_payload, extract_price_insights, fetch_error_is_transient
 
+_FARE_HORIZON_DAYS = 302  # stay ~10d below the observed death band (+315..+323)
+_BACKOFFS = [15, 60, 300, 900, 1800]  # rate-limited → escalate to ~30 min, never abort
+
+
+def plan_chunks(flex_start: _dt.date, flex_end: _dt.date, explicit_size: int | None) -> tuple[list[tuple[_dt.date, _dt.date, int]], tuple[_dt.date, _dt.date] | None]:
+    """Adaptive request planner (see SKILL.md 'Fare-publication horizon').
+
+    Inside the wall → chunks of min(span, ~185 days): a ≤6-month range costs
+    ONE request per direction. Past the clamp → a cheap leaf_floor-60 probe
+    of the first 30 days (emptiness is monotonic); anything farther comes
+    back as an offline tail. Explicit size overrides slicing entirely."""
+    today = _dt.date.today()
+    wall = today + _dt.timedelta(days=_FARE_HORIZON_DAYS)
+    plans: list[tuple[_dt.date, _dt.date, int]] = []
+    if explicit_size:
+        size = max(7, min(200, explicit_size))
+        c = flex_start
+        while c <= flex_end:
+            plans.append((c, min(c + _dt.timedelta(days=size - 1), flex_end), 10))
+            c += _dt.timedelta(days=size)
+        return plans, None
+    z_end = min(flex_end, wall)
+    if z_end >= flex_start:
+        span = (z_end - flex_start).days + 1
+        size = min(185, span)
+        c = flex_start
+        while c <= z_end:
+            plans.append((c, min(c + _dt.timedelta(days=size - 1), z_end), 10))
+            c += _dt.timedelta(days=size)
+    tail = None
+    if flex_end > z_end:
+        start_b = z_end + _dt.timedelta(days=1)
+        probe_end = min(z_end + _dt.timedelta(days=30), flex_end)
+        plans.append((start_b, probe_end, 60))
+        if probe_end < flex_end:
+            tail = (probe_end + _dt.timedelta(days=1), flex_end)
+    return plans, tail
+
+
+def make_sweeper(
+    *,
+    currency: str,
+    language: str,
+    seat: str,
+    passengers_dict: dict[str, int],
+    baggage_args: dict[str, Any],
+    filters: dict[str, Any],
+    max_price: int | None,
+    proxy: str | None,
+    conc: int,
+    keep_tokens: bool = False,
+    session: Any = None,
+    fetch_errors: list[dict[str, str]] | None = None,
+):
+    """Factory returning `_sweep(frm, to, start, end, depth, leaf_floor, max_backoffs)`
+    — a one-way calendar sweep with split-retry on genuine no-data and
+    escalating backoff on throttling (never splits on transient errors)."""
+    errors: list[dict[str, str]] = fetch_errors if fetch_errors is not None else []
+
+    def _sweep(frm: str, to: str, start: _dt.date, end: _dt.date, depth: int = 0, leaf_floor: int = 10, max_backoffs: int | None = None) -> dict[str, dict[str, Any]]:
+        span = (end - start).days
+        base = start + _dt.timedelta(days=span // 2)
+        window = max(span - (span // 2), span // 2) + 1
+        backoffs = _BACKOFFS if max_backoffs is None else [10] * min(1, max(0, max_backoffs))
+        attempt = 0
+        while True:
+            detail = hint = None
+            try:
+                entries, _ = native_grid_for_route(
+                    frm,
+                    to,
+                    base.isoformat(),
+                    None,
+                    window,
+                    currency,
+                    language,
+                    seat,
+                    passengers_dict,
+                    baggage_args,
+                    filters,
+                    max_price,
+                    proxy,
+                    conc,
+                    session=session,
+                    keep_tokens=keep_tokens,
+                )
+                got = {e["departure"]: e for e in entries if e.get("departure")}
+                if got or span <= leaf_floor:
+                    return got
+                detail, hint = "empty calendar response", "no entries for this window"
+                break
+            except Exception as exc:
+                detail, hint = _classify_fetch_error(exc)
+                if fetch_error_is_transient(detail) and attempt < len(backoffs):
+                    attempt += 1
+                    time.sleep(backoffs[attempt - 1])
+                    continue
+                break
+        if detail == "empty calendar response" and span > leaf_floor:
+            mid = start + _dt.timedelta(days=span // 2)
+            merged = {
+                **_sweep(frm, to, start, mid, depth + 1, leaf_floor, len(backoffs)),
+                **_sweep(frm, to, mid + _dt.timedelta(days=1), end, depth + 1, leaf_floor, len(backoffs)),
+            }
+            if merged or depth >= 3:
+                return merged
+        errors.append({"from": start.isoformat(), "to": end.isoformat(), "error": f"{detail} — {hint}"})
+        return {}
+
+    return _sweep
+
+
 def run_flex_range(args, *, trip: str, url: str, compat_note: str | None = None) -> None:
     if not args.from_ or not args.to or not args.flex_range:
         emit_error("flexible searches require --from, --to, --flex-starting-date, --flex-ending-date, and --flex-days", hint="workable: e.g. --from SSA --to MAD --flex-starting-date 2027-01-01 --flex-ending-date 2027-12-31 --flex-days 12")
@@ -63,57 +175,19 @@ def run_flex_range(args, *, trip: str, url: str, compat_note: str | None = None)
     min_stay = args.min_stay
     max_stay = args.max_stay
 
-    _BACKOFFS = [15, 60, 300, 900, 1800]  # rate-limited → escalate to ~30 min, never abort
-
-    def _sweep(frm: str, to: str, start: _dt.date, end: _dt.date, depth: int = 0, leaf_floor: int = 10, max_backoffs: int | None = None) -> dict[str, dict[str, Any]]:
-        span = (end - start).days
-        base = start + _dt.timedelta(days=span // 2)
-        window = max(span - (span // 2), span // 2) + 1
-        backoffs = _BACKOFFS if max_backoffs is None else [10] * min(1, max(0, max_backoffs))
-        attempt = 0
-        while True:
-            detail = hint = None
-            try:
-                entries, _ = native_grid_for_route(
-                    frm,
-                    to,
-                    base.isoformat(),
-                    None,
-                    window,
-                    args.currency,
-                    args.language,
-                    args.seat,
-                    passengers_dict,
-                    baggage_args,
-                    filters,
-                    args.max_price,
-                    args.proxy,
-                    conc,
-                    keep_tokens=args.keep_tokens,
-                )
-                got = {e["departure"]: e for e in entries if e.get("departure")}
-                if got or span <= leaf_floor:
-                    return got
-                detail, hint = "empty calendar response", "no entries for this window"
-                break  # genuine no-data: may split below
-            except Exception as exc:
-                detail, hint = _classify_fetch_error(exc)
-                if fetch_error_is_transient(detail) and attempt < len(backoffs):
-                    wait = backoffs[attempt]
-                    attempt += 1
-                    time.sleep(wait)
-                    continue
-                break  # non-transient or patience exhausted: record once, no split storm
-        if detail == "empty calendar response" and span > leaf_floor:
-            mid = start + _dt.timedelta(days=span // 2)
-            merged = {
-                **_sweep(frm, to, start, mid, depth + 1, leaf_floor, len(backoffs)),
-                **_sweep(frm, to, mid + _dt.timedelta(days=1), end, depth + 1, leaf_floor, len(backoffs)),
-            }
-            if merged or depth >= 3:
-                return merged
-        fetch_errors.append({"from": start.isoformat(), "to": end.isoformat(), "error": f"{detail} — {hint}"})
-        return {}
+    _sweep = make_sweeper(
+        currency=args.currency,
+        language=args.language,
+        seat=args.seat,
+        passengers_dict=passengers_dict,
+        baggage_args=baggage_args,
+        filters=filters,
+        max_price=args.max_price,
+        proxy=args.proxy,
+        conc=conc,
+        keep_tokens=args.keep_tokens,
+        fetch_errors=fetch_errors,
+    )
 
     def _merge(dst: dict[str, dict[str, Any]], src: dict[str, dict[str, Any]]) -> None:
         for k, v in src.items():
@@ -134,45 +208,10 @@ def run_flex_range(args, *, trip: str, url: str, compat_note: str | None = None)
     today = _dt.date.today()
     wall = today + _dt.timedelta(days=_FARE_HORIZON_DAYS)
 
-    def _plan_chunks() -> tuple[list[tuple[_dt.date, _dt.date, int]], tuple[_dt.date, _dt.date] | None]:
-        import os as _os
-        if _os.environ.get("FLEX_DEBUG"):
-            print(f"[plan] today={today} wall={wall} explicit={args.flex_chunk_days} start={flex_start} end={flex_end}", file=sys.stderr)
-        """Returns (chunks, unfetched_tail). Emptiness beyond the wall is
-        monotonic, so only the first 30 days past it are probed; anything
-        farther is reported as an offline gap."""
-        plans: list[tuple[_dt.date, _dt.date, int]] = []
-        if args.flex_chunk_days:  # explicit override: uniform slicing, full range
-            size = max(7, min(200, args.flex_chunk_days))
-            c = flex_start
-            while c <= flex_end:
-                plans.append((c, min(c + _dt.timedelta(days=size - 1), flex_end), 10))
-                c += _dt.timedelta(days=size)
-            return plans, None
-        z_end = min(flex_end, wall)
-        if z_end >= flex_start:
-            span = (z_end - flex_start).days + 1
-            size = min(185, span)
-            c = flex_start
-            while c <= z_end:
-                plans.append((c, min(c + _dt.timedelta(days=size - 1), z_end), 10))
-                c += _dt.timedelta(days=size)
-        tail = None
-        if flex_end > z_end:
-            start_b = z_end + _dt.timedelta(days=1)
-            probe_end = min(z_end + _dt.timedelta(days=30), flex_end)
-            plans.append((start_b, probe_end, 60))  # cheap emptiness confirmation
-            if probe_end < flex_end:
-                tail = (probe_end + _dt.timedelta(days=1), flex_end)
-        if _os.environ.get("FLEX_DEBUG"):
-            for p in plans:
-                print(f"[plan] chunk {p[0]} → {p[1]} leaf={p[2]}", file=sys.stderr)
-            print(f"[plan] tail={tail}", file=sys.stderr)
-        return plans, tail
     outbound: dict[str, dict[str, Any]] = {}
     inbound: dict[str, dict[str, Any]] = {}
     probe_zones: list[tuple[_dt.date, _dt.date]] = []
-    plans, unfetched_tail = _plan_chunks()
+    plans, unfetched_tail = plan_chunks(flex_start, flex_end, args.flex_chunk_days)
     for c_start, c_end, leaf_floor in plans:
         is_probe = leaf_floor > 10
         if is_probe:
