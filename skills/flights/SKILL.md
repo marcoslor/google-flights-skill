@@ -1,6 +1,6 @@
 ---
 name: flights
-description: Fast Google Flights search via the protobuf API (fast-flights + reverse-engineered RPCs) — no browser, no anti-bot wall. Use when the user wants to find flights, compare prices, check routes or flexible dates, explore destinations from an origin, search multiple airports at once, or find partner-airline itineraries ("find flight GRU to JFK", "cheapest MYJ to TPE", "round-trip SFO to NRT", "flexible dates GRU JFK", "anywhere from SSA on Gol"). When the user restricts airlines, clarify strict operating-carrier versus partner/codeshare intent before searching.
+description: Fast Google Flights search via the protobuf API (fast-flights + reverse-engineered RPCs) — no browser, no anti-bot wall. Use when the user wants to find flights, compare prices, check routes or flexible dates, explore destinations from an origin, search multiple airports at once, or find partner-airline itineraries ("find flight GRU to JFK", "cheapest MYJ to TPE", "round-trip SFO to NRT", "flexible dates GRU JFK", "anywhere from SSA on Gol"). Airline restrictions default to anchor-carrier-plus-partners; missing details (origin → SSA, currency → BRL) are assumed and stated — proceed without blocking questions.
 license: MIT
 metadata:
   author: marcoslor
@@ -12,7 +12,7 @@ metadata:
 
 ## Default workflow (follow for ANY flights request — no user prompting needed)
 
-1. Load context: origin/destination codes, dates or date-range, stay length, airline intent (ask only if the Airline intent rule below requires it).
+1. Load context: origin/destination codes, dates or date-range, stay length, airline intent — apply the Defaults for anything missing and proceed; never block on questions.
 2. **Airline-constrained "anywhere/region" asks** (e.g. "Europe via Gol"): build the universe with `scripts/airline-destinations.py` first (anchor mode), never `--explore`.
 3. **Cheapest-date or open-ended date asks** ("cheapest week/month", "flexible", "sometime in 2027", a month range): sweep with `--flex-starting-date/--flex-ending-date` + `--flex-days` or `--min-stay/--max-stay`. Never anchor a fixed `--date`. Batch multiple destinations into ONE `--explore-dests` sweep with `--per-dest-top N`.
 4. **Verify** grid/explore candidates with exact fixed-date searches (`--include-airlines G3 --hide-separate`) before presenting them as bookable.
@@ -28,15 +28,27 @@ The ONLY context the invoking agent needs:
 
 Filters and sorting are OPTIONAL refinements.
 
-## Airline intent — clarify before filtering
+## Airline intent — default to partners, state, proceed
 
-Whenever the user says **"only [airline]"**, asks to exclude airlines, or otherwise requests an airline restriction, ask which meaning they intend before searching if partner semantics are not explicit:
+When the user names an airline without specifying semantics, do NOT stop to ask. Proceed immediately with the default interpretation and say so in one line:
 
-1. **Strict operating carrier** — every segment must be operated by the named airline (e.g. `G3` only).
-2. **Anchor carrier plus partners** — the itinerary must contain at least one segment operated by the named airline, while partner airlines may operate the remaining segments; normally require one ticket and no self-transfer.
-3. **Sold/bookable through the airline or loyalty program** — partner-only flights may be acceptable if the user explicitly allows them.
+**Default: anchor carrier plus partners** — itinerary must contain ≥1 segment operated by the named airline (`--include-airlines G3 --hide-separate` recipe); partner metal fills the remaining segments. This is almost always what people mean, and the strict filter would wrongly return zero on most international routes.
 
-Do not assume that “find me GOL” means `--airlines G3`. That strict Google filter can hide valid GOL + Air France/KLM/other-partner itineraries. If the user does not answer, state the assumption before proceeding; for destination-discovery requests, prefer asking the clarification.
+State the assumption once ("Assuming Gol + partners, one ticket — say 'strict Gol' for all-Gol metal") and continue. Only re-run with `--airlines X` (strict) if the user pushes back.
+
+Meanings for reference:
+1. **Strict operating carrier** — every segment operated by the named airline (`--airlines G3`); zero results wherever partners are required.
+2. **Anchor carrier plus partners** ← DEFAULT
+3. **Sold/bookable through the airline or loyalty program** — same command shape as the default; mention if relevant.
+
+Never silently use bare `--airlines G3` for a "via/with Gol" ask — that hides every mixed-itinerary fare.
+
+## Defaults — never block on these
+
+Proceed with these whenever the user omits them, stating them once in the final answer:
+- **Origin unspecified → SSA (Salvador).**
+- Currency → BRL · cabin → economy · 1 adult.
+- "Cheapest weeks/months/dates" → sweep a range, bucket grid cells by departure week (Mon–Sun), week price = min cell, rank ascending, verify winners with exact searches before presenting.
 
 ## The single entry point
 ```
@@ -248,7 +260,7 @@ When the user's intent is to discover or list an airline's destinations, tell th
 
 ### Rules
 
-0. If the user requests an airline filter without clearly stating strict operating-carrier versus partner/codeshare intent, ask the clarification above before searching.
+0. If the user requests an airline filter without clearly stating strict operating-carrier versus partner/codeshare intent, proceed on the DEFAULT (anchor + partners) and state the assumption — do not stop to ask.
 1. If the user mentions partnership ("com parceria", "via parceira"), NEVER use bare `--airlines G3` with airport codes — it silently returns zero.
 2. Use the unfiltered exact-search recipe (`--include-airlines G3`, no `--airlines`) for broad GOL-partner discovery. Use the ecosystem server-filter (`--airlines G3,AF`) + anchor client-filter (`--include-airlines G3`) only when the user explicitly selected the Air France ecosystem or when a partner-specific probe is needed. Output carries `"notes": ["filtered to itineraries including G3"]`.
 3. `--include-airlines` accepts codes or names (`G3`, `GOL`, `Gol`) and applies ONLY to itinerary results. Grid/flex/explore cells carry no carrier names — the output adds a note saying so; verify carriers via the cell `url`.
