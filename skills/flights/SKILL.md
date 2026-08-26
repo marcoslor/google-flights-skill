@@ -5,7 +5,7 @@ license: MIT
 metadata:
   author: marcoslor
   repository: https://github.com/marcoslor/google-flights-skill
-  version: "1.1"
+  version: "1.2"
 ---
 
 # Flights (Google Flights via fast-flights)
@@ -36,6 +36,7 @@ scripts/flights-search.py [flags]
 # or via python:
 python3 scripts/flights-search.py [flags]
 ```
+The launcher is thin; implementation lives in the `scripts/flights_search/` package (`util`, `dataset`, `tfs_urls`, `calendar_rpc`, `queries`, `explore`, `flex_engine`, `cli`). All paths in this document are relative to this skill's base directory.
 It builds the protobuf query, fetches, parses, and prints **one JSON line**. Shapes:
 - `{"ok":true,"query":{"from":"GRU","to":"JFK","date":"2026-09-01",...},"count":N,"flights":[{price,airlines,flights:[{from,to,departure,arrival,duration,plane_type}],carbon}],"metadata":{...},"url":"https://www.google.com/travel/flights/search?tfs=..."}`
 - `{"ok":true,"count":0,"flights":[]}` — no flights found (not an error).
@@ -48,7 +49,7 @@ No login, no `/verify` wall. If `primp` is blocked (rare), the error detail will
 - `--from CODE` — origin IATA (e.g. `GRU`, `SSA`, `JFK`) — required
 - `--to CODE` — destination IATA — required unless exploring (omit `--to` to explore anywhere from `--from`)
 - fixed-date search: `--date YYYY-MM-DD` — departure date
-- flexible-date search: `--flex-starting-date YYYY-MM-DD --flex-ending-date YYYY-MM-DD --flex-days N` — departure range plus exact trip length
+- flexible-date search: `--flex-starting-date YYYY-MM-DD --flex-ending-date YYYY-MM-DD` plus either `--flex-days N` (exact length) or `--min-stay A --max-stay B` (band). The engine sweeps the range in `--flex-chunk-days` chunks (default 30), sums outbound+reversed one-way calendars per (departure, stay), auto-splits failed chunks, and reports uncovered stretches in `coverage.gaps`. Cell prices are estimates — always verify candidates with an exact fixed-date round-trip search before quoting them as bookable fares
 - `--legs JSON` — alternative to `--from/--to/--date` for fixed-date multi-city
 
 **Optional (sensible defaults, agent may omit):**
@@ -117,13 +118,13 @@ Not combinable with `--explore`, a flexible date range, `--legs`, or `/m/` city 
 
 ## Flexible dates — explicit departure range
 
-Flexible round-trip searches use three explicit fields:
+Flexible round-trip searches use the explicit range flags:
 
 - `--flex-starting-date` — earliest departure date to consider
 - `--flex-ending-date` — latest departure date to consider
-- `--flex-days` — exact number of days between departure and return
+- trip length: either `--flex-days N` (exact) or `--min-stay A --max-stay B` (band; cells then carry a `stay` key)
 
-The script searches the complete requested departure range using Google's native calendar RPC, filters to the exact stay length, sorts by price, and returns the cheapest date pairs. These are not anchor dates and are not shown as fixed itinerary dates in the output.
+**Flag vocabulary is closed.** The only flexible flags are those four plus `--flex-chunk-days`. Do NOT invent others. For compatibility, `--date D --flex-window W [--flex-months M]` is accepted and silently translated into an equivalent departure range (output carries a `compat` note); prefer the explicit range flags.
 
 Example: cheapest 12-day trips departing anytime in 2027:
 
@@ -134,7 +135,21 @@ scripts/flights-search.py --from SSA --to MAD \
   --flex-days 12 --currency BRL
 ```
 
-Output mode is `flex-date-range`, with `query.flex_starting_date`, `query.flex_ending_date`, and `query.flex_days`.
+Variable-stay example — cheapest trips of 9–14 days in Q2 2027:
+
+```
+scripts/flights-search.py --from SSA --to LIS \
+  --flex-starting-date 2027-04-01 --flex-ending-date 2027-06-30 \
+  --min-stay 9 --max-stay 14 --currency BRL
+```
+
+Output mode is `flex-date-range`. Key fields: `grid` (cells with `departure`, `return`, `price`, optional `stay`/`error`), `cheapest`, and `coverage` = `{requested_from, requested_to, priced_from, priced_to, stays, gaps:[{from,to}]}`. Read `coverage.gaps` before concluding anything: unpriced stretches are normal beyond Google's fare-publication horizon.
+
+### Fare-publication horizon (read before sweeping far dates)
+
+Google's fare calendar publishes roughly **today → today+10½ months** (rolling). Departures beyond that come back as unpriced cells (`coverage.gaps` + trailing note); exact fixed-date searches return 0 there too until airlines load schedules. This is not a bug — do not retry or debug it. When a user asks for dates past the wall, answer with what IS priced and state plainly that later months are not yet bookable/published.
+
+Typical runtimes (set tool timeouts accordingly): short sweep ≤1 month ≈ 5–20 s; one quarter ≈ 20–60 s; full year ≈ 1–3 min per route (use timeout ≥ 300000 ms).
 
 The native price graph remains available for a fixed-date, near-term search:
 
@@ -259,7 +274,7 @@ Optional explore flags:
 
 ## Long-horizon sweeps
 
-Open-ended date questions ("after January", "sometime next summer") should SWEEP months, not anchor on one week:
+Open-ended date questions ("after January", "sometime next summer", "cheapest week") must SWEEP a range, never anchor on one fixed start day:
 
 ```
 # full 2027 range, exact 12-day stay; no arbitrary anchor date is exposed
@@ -268,11 +283,12 @@ scripts/flights-search.py --from SSA --to BCN \
   --flex-days 12
 ```
 
-The script automatically chunks the requested range into native calendar requests, deduplicates cells, and filters exact departure/return pairs. Request cost grows with the range and destination count; pacing keeps anonymous sessions off Google's captcha wall. If Google returns HTTP 429 `/sorry`, wait a few minutes and retry — the error is surfaced in the output hint.
+The engine chunks the range automatically (`--flex-chunk-days`, default 30), retries failed chunks by splitting them, deduplicates cells, and filters to the requested stay(s). Pacing keeps anonymous sessions off Google's captcha wall; if you hit HTTP 429 `/sorry`, wait a few minutes and retry.
 
-**Agent rule:** for open-ended periods, translate the user's date boundary into `--flex-starting-date` and `--flex-ending-date`; never invent a fixed `--date`/`--return-date` pair as the flexible search. Always pass the requested duration as `--flex-days`.
-
-**Agent rule for "top-N per destination" questions:** pass `--per-dest-top 3 --flex-starting-date ... --flex-ending-date ... --flex-days X` on the FIRST capped sweep AND on every `--explore-dests` batch (so you never stitch outputs by hand), then merge `per_dest_top` maps. For destinations the budget didn't cover, follow up with ONE batched command per ~15 destinations using `--explore-dests MAD,LIS,FCO,...` (same flags), not one invocation per destination.
+**Agent rules:**
+- Translate the user's date boundary into `--flex-starting-date`/`--flex-ending-date`; never invent a fixed `--date`/`--return-date` pair for "flexible/cheapest" asks. Duration → `--flex-days`, or `--min-stay/--max-stay` when the user gives a range or says "around N days".
+- For "top-N per destination": pass `--per-dest-top N --flex-starting-date ... --flex-ending-date ... --flex-days X` on the FIRST capped sweep AND on every `--explore-dests` batch (never stitch outputs by hand), then merge `per_dest_top` maps. For uncovered destinations follow up with ONE batched command per ~15 destinations via `--explore-dests MAD,LIS,FCO,...`.
+- Check `coverage.priced_from/priced_to/gaps` before presenting; beyond the fare-publication horizon (see above) gaps are expected — report them, don't debug.
 
 ## Invoking from an agent (minimal context)
 Pass the skill + query + output intent:
